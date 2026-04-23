@@ -14,12 +14,14 @@ cat > "$HOME/.irods/irods_environment.json" << 'EOF'
 {
   "irods_host": "irods-server",
   "irods_port": 1247,
-  "irods_user_name": "rods",
+  "irods_user_name": "irods",
   "irods_zone_name": "testZone",
-  "irods_authentication_scheme": "native"
+  "irods_home": "/testZone/home/irods",
+  "irods_default_resource": "replResc"
 }
 EOF
-echo "rods" | iinit
+nc -z -v irods-server 1247
+echo "irods" | script -q -c "iinit" /dev/null
 
 # Build and test
 cargo build

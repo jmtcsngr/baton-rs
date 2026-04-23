@@ -17,12 +17,13 @@ cat > "$HOME/.irods/irods_environment.json" << 'EOF'
 {
   "irods_host": "localhost",
   "irods_port": 1247,
-  "irods_user_name": "rods",
+  "irods_user_name": "irods",
   "irods_zone_name": "testZone",
-  "irods_authentication_scheme": "native"
+  "irods_home": "/testZone/home/irods",
+  "irods_default_resource": "replResc"
 }
 EOF
-echo "rods" | iinit || true
+echo "irods" | script -q -c "iinit" /dev/null || true
 
 # Install useful cargo tools
 cargo install cargo-nextest cargo-watch
