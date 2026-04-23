@@ -1,0 +1,32 @@
+{
+  "name": "baton-rs",
+  "image": "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.5:latest",
+
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": { "version": "stable" },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "serayuzgur.crates",
+        "tamasfe.even-better-toml",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.buildScripts.enable": true,
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  },
+
+  "forwardPorts": [1247],
+  "portsAttributes": {
+    "1247": { "label": "iRODS", "onAutoForward": "silent" }
+  }
+}

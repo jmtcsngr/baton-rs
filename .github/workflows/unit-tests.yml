@@ -1,0 +1,53 @@
+name: "Unit tests"
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+
+    strategy:
+      matrix:
+        include:
+          - irods: "4.2.7"
+            build_image: "ghcr.io/wtsi-npg/ub-16.04-irods-clients-dev-4.2.7:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-16.04-irods-4.2.7:latest"
+            experimental: false
+          - irods: "4.3.4"
+            build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.4:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.4:latest"
+            experimental: false
+          - irods: "4.3.5"
+            build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.5:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.5:latest"
+            experimental: false
+
+    services:
+      irods-server:
+        image: ${{ matrix.server_image }}
+        ports:
+          - "1247:1247"
+          - "20000-20199:20000-20199"
+        volumes:
+          - /dev/shm:/dev/shm
+        options: >-
+          --health-cmd "nc -z -v localhost 1247"
+          --health-start-period 60s
+          --health-interval 10s
+          --health-timeout 20s
+          --health-retries 6
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Build and test"
+        uses: wtsi-npg/build-irods-client-action@v1.1.1
+        with:
+          build-image: ${{ matrix.build_image }}
+          build-script: docker/build.sh
+          docker-network: ${{ job.services.irods-server.network }}
+
+      - name: "Show test log"
+        if: ${{ failure() }}
+        run: find "$GITHUB_WORKSPACE" -name "*.log" -exec cat {} \;
