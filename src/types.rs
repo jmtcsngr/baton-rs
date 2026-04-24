@@ -100,6 +100,39 @@ pub struct Timestamp {
     pub replicate: Option<u32>,
 }
 
+/// Comparison operator used in baton metadata queries.
+///
+/// The `n`-prefixed variants are the numeric-comparison counterparts; baton
+/// uses these to force numeric comparison for values that are strings in the
+/// iRODS catalogue but should compare numerically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Operator {
+    #[serde(rename = "=")]
+    Equals,
+    #[serde(rename = "like")]
+    Like,
+    #[serde(rename = "not like")]
+    NotLike,
+    #[serde(rename = "in")]
+    In,
+    #[serde(rename = ">")]
+    GreaterThan,
+    #[serde(rename = "n>")]
+    NumericGreaterThan,
+    #[serde(rename = "<")]
+    LessThan,
+    #[serde(rename = "n<")]
+    NumericLessThan,
+    #[serde(rename = ">=")]
+    GreaterThanOrEqual,
+    #[serde(rename = "n>=")]
+    NumericGreaterThanOrEqual,
+    #[serde(rename = "<=")]
+    LessThanOrEqual,
+    #[serde(rename = "n<=")]
+    NumericLessThanOrEqual,
+}
+
 /// A data object in iRODS (a file).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataObject {
@@ -315,5 +348,29 @@ mod tests {
         let c: Collection = serde_json::from_str(json).unwrap();
         assert_eq!(c.avus.as_ref().map(Vec::len), Some(1));
         assert_eq!(serde_json::to_string(&c).unwrap(), json);
+    }
+
+    // --- Operator ---
+
+    #[test]
+    fn operator_round_trip_all_variants() {
+        for (literal, op) in [
+            (r#""=""#, Operator::Equals),
+            (r#""like""#, Operator::Like),
+            (r#""not like""#, Operator::NotLike),
+            (r#""in""#, Operator::In),
+            (r#"">""#, Operator::GreaterThan),
+            (r#""n>""#, Operator::NumericGreaterThan),
+            (r#""<""#, Operator::LessThan),
+            (r#""n<""#, Operator::NumericLessThan),
+            (r#"">=""#, Operator::GreaterThanOrEqual),
+            (r#""n>=""#, Operator::NumericGreaterThanOrEqual),
+            (r#""<=""#, Operator::LessThanOrEqual),
+            (r#""n<=""#, Operator::NumericLessThanOrEqual),
+        ] {
+            let parsed: Operator = serde_json::from_str(literal).unwrap();
+            assert_eq!(parsed, op);
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), literal);
+        }
     }
 }
