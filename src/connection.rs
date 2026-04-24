@@ -15,11 +15,31 @@
 //! not safe to share across threads, and the raw-pointer field makes
 //! `RodsConnection` `!Send` and `!Sync` automatically.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 
 use crate::error::BatonError;
 use crate::ffi;
+
+/// Distilled-down stat output: just the fields that the listing layer
+/// needs. Avoids leaking `rodsObjStat_t` across the public crate boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjStat {
+    pub size: u64,
+    /// Empty string when iRODS has no checksum recorded for this object
+    /// (collections, or data objects where `ichksum` has never run).
+    pub checksum: String,
+    pub obj_type: ObjType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjType {
+    DataObject,
+    Collection,
+    /// iRODS sometimes reports additional types (e.g. spec-coll link targets).
+    /// Carry the raw code so callers who care can handle it.
+    Other(i32),
+}
 
 /// A live connection to an iRODS server.
 pub struct RodsConnection {
@@ -70,6 +90,75 @@ impl RodsConnection {
         }
 
         Ok(conn)
+    }
+
+    /// Stat an iRODS path to confirm existence and discover basic metadata
+    /// (size, checksum, object type).
+    ///
+    /// Wraps `rcObjStat` + `freeRodsObjStat`. Callers get a plain Rust
+    /// [`ObjStat`]; the underlying iRODS allocation is released before this
+    /// method returns.
+    pub fn stat(&mut self, path: &str) -> Result<ObjStat, BatonError> {
+        // Build the input struct. Only objPath is populated; everything else
+        // is left zeroed (rcObjStat reads no other fields for a plain stat).
+        let mut inp = MaybeUninit::<ffi::dataObjInp_t>::zeroed();
+        let inp_ref = unsafe { inp.assume_init_mut() };
+
+        let path_c = CString::new(path).map_err(|_| BatonError {
+            code: -1,
+            message: "path contains interior NUL".to_string(),
+        })?;
+        let path_bytes = path_c.as_bytes();
+        if path_bytes.len() >= inp_ref.objPath.len() {
+            return Err(BatonError {
+                code: -1,
+                message: format!(
+                    "path length {} exceeds MAX_NAME_LEN {}",
+                    path_bytes.len(),
+                    inp_ref.objPath.len() - 1
+                ),
+            });
+        }
+        for (i, &b) in path_bytes.iter().enumerate() {
+            inp_ref.objPath[i] = b as std::os::raw::c_char;
+        }
+        // objPath was zero-initialised, so the NUL terminator is already there.
+
+        let mut stat_out: *mut ffi::rodsObjStat_t = std::ptr::null_mut();
+        let status = unsafe { ffi::rcObjStat(self.conn, inp_ref, &mut stat_out) };
+
+        if status < 0 {
+            return Err(BatonError::from_irods(status));
+        }
+        if stat_out.is_null() {
+            return Err(BatonError {
+                code: -1,
+                message: "rcObjStat returned null with non-negative status".to_string(),
+            });
+        }
+
+        // Read out the fields we care about while stat_out is still valid.
+        let stat_ref = unsafe { &*stat_out };
+        let obj_type = match stat_ref.objType as i32 {
+            // DATA_OBJ_T = 1, COLL_OBJ_T = 2 in iRODS rodsType.h.
+            1 => ObjType::DataObject,
+            2 => ObjType::Collection,
+            other => ObjType::Other(other),
+        };
+        let result = ObjStat {
+            size: stat_ref.objSize as u64,
+            checksum: unsafe { CStr::from_ptr(stat_ref.chksum.as_ptr()) }
+                .to_string_lossy()
+                .into_owned(),
+            obj_type,
+        };
+
+        // Always free, even if we'd constructed an error above.
+        unsafe {
+            ffi::freeRodsObjStat(stat_out);
+        }
+
+        Ok(result)
     }
 
     /// Tear down the current connection and build a fresh one in its

@@ -10,6 +10,7 @@
 pub mod connection;
 pub mod error;
 pub(crate) mod ffi;
+pub mod operations;
 pub mod types;
 
 pub use connection::RodsConnection;
