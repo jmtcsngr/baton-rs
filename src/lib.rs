@@ -7,8 +7,11 @@
 //!
 //! See `PLAN.md` at the repository root for the multi-session implementation plan.
 
+pub mod connection;
 pub mod error;
+pub(crate) mod ffi;
 pub mod types;
 
+pub use connection::RodsConnection;
 pub use error::BatonError;
 pub use types::*;

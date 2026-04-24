@@ -106,21 +106,45 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 2 — iRODS FFI layer
 
-**Status:** `<not started>`
+**Status:** completed on 2026-04-24
 
 **Goal:** bindgen against iRODS C headers, safe RodsConnection wrapper, auto-reconnect logic.
 
 **Completed:**
-- `<fill in>`
+- `build.rs` — bindgen generates raw FFI bindings from `wrapper.h` (which includes `rodsClient.h`) into `$OUT_DIR/bindings.rs` at build time; not committed to the repo.
+- Narrow bindgen allowlist: `rcConnect`, `rcDisconnect`, `clientLogin`, `clientLoginWithPassword`, `getRodsEnv`, `obfGetPw`, `rErrMsg`, `rodsErrorName`; types `rcComm_t`, `rodsEnv`, `rErrMsg_t`; constant families `CAT_*`, `SYS_*`, `AUTH_*`, `USER_*`.
+- `docker/build.sh` and `.devcontainer/setup.sh` install `libclang-dev` + `clang` (bindgen needs both libclang and the driver-provided resource directory).
+- Link directives emit `-l irods_client -l irods_common` (both required; splitting uncovered in debugging).
+- `src/ffi.rs` — `pub(crate)` module that includes the generated bindings. Not part of the public crate API.
+- `src/connection.rs::RodsConnection` — RAII wrapper over `rcComm_t *`:
+  - `connect_from_env()` opens the TCP connection via `getRodsEnv` + `rcConnect`.
+  - `login_from_auth_file()` authenticates by chaining `obfGetPw` (reads `.irodsA`) + `clientLoginWithPassword` (legacy native handshake). Deliberately bypasses `clientLogin` — see issue #10.
+  - `reconnect()` does disconnect + fresh connect + re-login in place.
+  - `Drop` calls `rcDisconnect` (null-safe; sets pointer to null after).
+  - `!Send` + `!Sync` by default from the raw-pointer field.
+- `src/error.rs::BatonError` gains `from_irods(code)` and `from_irods_with_context(code, ctx)` that resolve the symbolic iRODS name via `rodsErrorName`. Connection-layer error paths use these.
+- Integration tests in `tests/`: `connection.rs`, `auth.rs`, `error.rs`, `reconnect.rs`. `tests/placeholder.rs` removed.
+- CI matrix: 4.3.4 and 4.3.5 strict and green. 4.2.7 flipped to `experimental: true` (libclang 3.8 on Ubuntu 16.04 too old for bindgen 0.71 — see issue #9).
 
 **Deferred / known gaps:**
-- `<fill in>`
+- `clientLogin` is still in the bindgen allowlist but unused, bypassed by the `obfGetPw` + `clientLoginWithPassword` path. Left in for a near-zero-cost re-enable if a future iRODS server image registers `AUTHENTICATE_CLIENT_AN` (API 110000). Rationale captured in issue #10.
+- Auto-reconnect driven by `--connect-time` — Session 3+ wires the time trigger; the `RodsConnection::reconnect` primitive is ready.
+- `clap`, `anyhow`, `tracing`, `tracing-subscriber` still deferred to Session 3.
+- Non-native auth schemes (PAM, GSI, Kerberos) — add sibling methods only when first needed.
+- 4.2.7 CI remains experimental until Session 4.5, when the C shim lands (issue #9).
 
 **Decisions made:**
-- `<fill in — especially final linking strategy, copy into Project constants above>`
+- Linking: dynamic against `libirods_client` + `libirods_common` from the iRODS `.deb` packages.
+- Bindings generated at build time, not committed — keeps bindings matched to whichever iRODS version is installed in the current CI matrix entry.
+- Authentication: legacy native path via `obfGetPw` + `clientLoginWithPassword` rather than `clientLogin`, because 4.3.x `clientLogin` unconditionally probes API 110000 which the test-server image doesn't register. Full context in issue #10.
+- Error enrichment: use iRODS's own `rodsErrorName` at `BatonError` construction time rather than maintaining a Rust match table. Auto-picks up new codes on bindgen rebuild.
+- Test coverage: only `-305111` / `USER_SOCK_CONNECT_ERR` is asserted by exact name in unit tests — the one code we've directly observed. Other known codes come along for the ride via the general `from_irods` path.
+- `RodsConnection` is `!Send`/`!Sync` by default (from the raw pointer) — matches iRODS's thread-per-connection model.
 
 **Open questions for next session:**
-- `<fill in>`
+- Which `clap` pattern for shared flags across binaries — derive macros with a `common_args` struct re-used via `#[command(flatten)]`, or arg groups? Revisit when the first binary goes in.
+- `tracing` wiring: how verbose should the default level be (INFO vs WARN)? `--verbose` and `--silent` are still the plan.
+- Add `Collection.contents` (mixed-item enum) early in Session 3 — it's the first place `baton-list --contents` pushes back on our current type layout.
 
 ---
 
@@ -269,3 +293,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-23` — SESSIONS.md template created; Project constants filled in (Session 0).
 - `2026-04-24` — Session 0 completed: CI green across iRODS 4.2.7/4.3.4/4.3.5 matrix.
 - `2026-04-24` — Session 1 completed: JSON data model and stub binaries.
+- `2026-04-24` — Session 2 completed: iRODS FFI + RodsConnection (connect, login, reconnect). 4.2.7 flipped experimental (issue #9); auth bypasses clientLogin (issue #10).

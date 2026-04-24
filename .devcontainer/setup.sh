@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Install libclang (required by bindgen for FFI generation — Session 2 onward).
+# The `clang` driver is installed alongside libclang-dev so libclang can locate
+# its own resource directory (fixes "'stddef.h' file not found" on older bases).
+sudo apt-get update -y
+sudo apt-get install -y --no-install-recommends libclang-dev clang
+
 # Start a local iRODS server sidecar
 docker run -d --name irods-server \
   -p 1247:1247 \
