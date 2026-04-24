@@ -6,10 +6,31 @@
 //! Requires a live iRODS server and an authenticated session — the usual
 //! devcontainer / CI setup.
 
+use std::process::Command;
+
 use baton_rs::connection::ObjType;
 use baton_rs::operations::list::{list_one, ListOptions};
-use baton_rs::types::Collection;
+use baton_rs::types::{Collection, DataObject};
 use baton_rs::{RodsConnection, Target};
+
+/// Drop-guard that removes a remote iRODS path via `irm -f` on Drop,
+/// so the test stays idempotent even if its assertions panic.
+struct IrodsCleanup(String);
+impl Drop for IrodsCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new("irm").args(["-f", &self.0]).status();
+    }
+}
+
+/// `iput -K local remote`: upload and register a server-side checksum.
+/// Panics on failure — this is test setup, not an assertion.
+fn iput_with_checksum(local: &str, remote: &str) {
+    let status = Command::new("iput")
+        .args(["-f", "-K", local, remote])
+        .status()
+        .expect("failed to spawn iput");
+    assert!(status.success(), "iput -K {} {} failed", local, remote);
+}
 
 #[test]
 fn list_home_collection_returns_target_unchanged() {
@@ -41,4 +62,93 @@ fn stat_home_collection_reports_collection_type() {
 
     let stat = conn.stat("/testZone/home/irods").expect("stat");
     assert_eq!(stat.obj_type, ObjType::Collection);
+}
+
+#[test]
+fn list_data_object_with_size_and_checksum_flags() {
+    // Pre-stage a data object we can stat with known size and a server-side
+    // checksum. iput -K registers the MD5 as part of the put so stat picks
+    // it up without a subsequent ichksum round-trip.
+    let local = "/tmp/baton_rs_test_file";
+    let content = b"hello world\n";
+    std::fs::write(local, content).expect("write local test file");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+    });
+
+    let opts = ListOptions {
+        size: true,
+        checksum: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject in output"),
+    };
+    assert_eq!(d.size, Some(content.len() as u64), "size flag populated");
+    assert!(
+        d.checksum
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "checksum flag populated (got {:?})",
+        d.checksum,
+    );
+}
+
+#[test]
+fn list_data_object_without_flags_preserves_none_fields() {
+    // Same path as the previous test — reusing the pre-staged object lets
+    // the two tests share an iput, but each one creates its own cleanup
+    // guard, and iput -f is idempotent so running them in either order is
+    // safe.
+    let local = "/tmp/baton_rs_test_file_noflags";
+    std::fs::write(local, b"noflags").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_noflags";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+    });
+
+    let result = list_one(&mut conn, input, &ListOptions::default()).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    assert_eq!(d.size, None, "size stays None when flag is off");
+    assert_eq!(d.checksum, None, "checksum stays None when flag is off");
 }

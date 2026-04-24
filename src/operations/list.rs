@@ -4,10 +4,9 @@
 //! `baton-list` logic: stat a target and optionally enrich the output with
 //! metadata requested by the caller's flags.
 //!
-//! Session 3a handles the path-only case (stat only, return the target
-//! unchanged) plus `--size` and `--checksum`. Metadata flags (`--avu`,
-//! `--acl`, `--replicate`, `--timestamp`) and `--contents` arrive in
-//! Sessions 3b / 3c respectively.
+//! Session 3a handles the path-only case (stat only) plus `--size` and
+//! `--checksum`. Metadata flags (`--avu`, `--acl`, `--replicate`,
+//! `--timestamp`) and `--contents` arrive in Sessions 3b / 3c respectively.
 
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
@@ -27,18 +26,32 @@ pub struct ListOptions {
 
 /// Process a single listing input.
 ///
-/// At this stage we call [`RodsConnection::stat`] to confirm the path
-/// exists and is of the expected type, then return the target. Flag
-/// handling lands in follow-up commits.
+/// Calls [`RodsConnection::stat`] to confirm the path exists and to pull
+/// back the fields that [`ListOptions::size`] / [`ListOptions::checksum`]
+/// need. `--size` and `--checksum` only apply to data objects; collections
+/// have no such fields in the baton JSON schema and flags are silently
+/// ignored for them (matching baton's own behaviour).
+///
+/// A recorded iRODS checksum of empty string (which is what servers return
+/// for data objects that have never been checksummed, and for collections)
+/// is treated the same as "no checksum" — we only set the field when a
+/// real value is present.
 pub fn list_one(
     conn: &mut RodsConnection,
-    target: Target,
-    _opts: &ListOptions,
+    mut target: Target,
+    opts: &ListOptions,
 ) -> Result<Target, BatonError> {
     let path = target.path();
-    // Stat verifies existence and surfaces any iRODS-side error (bad path,
-    // missing permissions, server down). We discard the result for now;
-    // the next commit consumes it to populate size / checksum.
-    let _stat = conn.stat(&path)?;
+    let stat = conn.stat(&path)?;
+
+    if let Target::DataObject(d) = &mut target {
+        if opts.size {
+            d.size = Some(stat.size);
+        }
+        if opts.checksum && !stat.checksum.is_empty() {
+            d.checksum = Some(stat.checksum);
+        }
+    }
+
     Ok(target)
 }
