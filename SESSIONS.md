@@ -10,7 +10,7 @@ Paste the relevant sections at the start of each new session to restore context 
 
 These values do not change during normal development. If they do change, note the reason here.
 
-- **Target baton version for parity:** `<pin exact version, e.g. 6.0.0>`
+- **Target baton version for parity:** `6.0.0`
 - **Reference schema:** <https://wtsi-npg.github.io/baton/>
 - **Primary compatibility oracle:** partisan's Python test suite, run with baton-rs's `baton-do` on `PATH`
 - **Supported iRODS versions (CI matrix):** 4.2.7, 4.3.4, 4.3.5 _(add 5.0.1 when ready)_
@@ -25,10 +25,10 @@ These values do not change during normal development. If they do change, note th
 
 Conventions adopted during Session 1 that apply to all subsequent sessions. Fill these in at the end of Session 1.
 
-- **Error handling:** `<e.g. thiserror in lib.rs, anyhow in src/bin/*.rs>`
-- **Logging:** `<e.g. tracing + tracing-subscriber, --verbose → DEBUG, --silent → ERROR>`
-- **JSON key ordering:** `<e.g. serde default; structural comparison in compatibility tests>`
-- **Short-form JSON aliases:** `<e.g. all types accept both a/v/u and attribute/value/units via serde alias>`
+- **Error handling:** `thiserror` in library code (`src/`), `anyhow` in `src/bin/*.rs`
+- **Logging:** `tracing` + `tracing-subscriber`, `--verbose` → DEBUG, `--silent` → ERROR (wiring added in Session 3)
+- **JSON key ordering:** serde default; structural comparison in compatibility tests (not byte-for-byte)
+- **Short-form JSON aliases:** types accept both long (`attribute`/`value`/`units`) and short (`a`/`v`/`u`) forms via serde `alias`; emit long form on serialise
 
 ---
 
@@ -72,7 +72,7 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 1 — Crate scaffold and JSON data model
 
-**Status:** `<not started / in progress / completed on YYYY-MM-DD>`
+**Status:** in progress
 
 **Goal:** Create the single crate with `src/bin/` stubs and define all JSON types with serde derives matching baton's schema.
 
