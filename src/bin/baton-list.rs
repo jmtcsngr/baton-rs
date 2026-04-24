@@ -114,11 +114,12 @@ fn main() -> Result<()> {
         let target: Target =
             serde_json::from_str(&line).context("parsing input line as a Target")?;
 
-        // Session 3a: fail-fast on iRODS errors. In-band error annotation
-        // lands in the last commit of this branch.
-        let result = list::list_one(&mut conn, target, &opts)?;
+        // iRODS-side failures per input are annotated in-band and the
+        // stream keeps going. Parse / IO errors above are still fail-fast
+        // — we can't annotate something we couldn't parse.
+        let output = list::list_one_annotated(&mut conn, target, &opts);
 
-        serde_json::to_writer(&mut out, &result).context("writing output line")?;
+        serde_json::to_writer(&mut out, &output).context("writing output line")?;
         writeln!(&mut out).context("writing newline")?;
     }
 

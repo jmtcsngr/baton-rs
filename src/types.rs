@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::BatonError;
+
 /// An iRODS path — serialised as a plain JSON string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -156,6 +158,11 @@ pub struct DataObject {
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub timestamps: Option<Vec<Timestamp>>,
+
+    /// Populated by in-band error annotation when an operation fails for
+    /// this specific input item.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<BatonError>,
 }
 
 /// A collection in iRODS (a directory).
@@ -174,6 +181,11 @@ pub struct Collection {
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub timestamps: Option<Vec<Timestamp>>,
+
+    /// Populated by in-band error annotation when an operation fails for
+    /// this specific input item.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<BatonError>,
 }
 
 /// A `baton-list` target — either a data object or a collection, distinguished
@@ -201,6 +213,16 @@ impl Target {
                     format!("{}/{}", d.collection, d.data_object)
                 }
             }
+        }
+    }
+
+    /// Annotate this target with an error. Used by the in-band error flow
+    /// to emit `{"collection": "…", "data_object": "…", "error": {…}}` on
+    /// a per-input failure instead of aborting the stream.
+    pub fn set_error(&mut self, err: BatonError) {
+        match self {
+            Target::DataObject(d) => d.error = Some(err),
+            Target::Collection(c) => c.error = Some(err),
         }
     }
 }
@@ -415,6 +437,7 @@ mod tests {
             access: None,
             replicates: None,
             timestamps: None,
+            error: None,
         };
         assert_eq!(Target::DataObject(d).path(), "/z/home/u/foo.txt");
     }
@@ -430,6 +453,7 @@ mod tests {
             access: None,
             replicates: None,
             timestamps: None,
+            error: None,
         };
         assert_eq!(Target::DataObject(d).path(), "/z/home/u/foo.txt");
     }
@@ -441,8 +465,43 @@ mod tests {
             avus: None,
             access: None,
             timestamps: None,
+            error: None,
         };
         assert_eq!(Target::Collection(c).path(), "/z/home/u");
+    }
+
+    #[test]
+    fn target_set_error_annotates_data_object() {
+        let mut t = Target::DataObject(DataObject {
+            collection: "/x".to_string(),
+            data_object: "y".to_string(),
+            size: None,
+            checksum: None,
+            avus: None,
+            access: None,
+            replicates: None,
+            timestamps: None,
+            error: None,
+        });
+        t.set_error(BatonError::from_irods(-310000));
+        match t {
+            Target::DataObject(d) => {
+                assert_eq!(d.error.as_ref().map(|e| e.code), Some(-310000));
+            }
+            _ => panic!("expected DataObject"),
+        }
+    }
+
+    #[test]
+    fn data_object_with_error_round_trip() {
+        let json = r#"{"collection":"/z","data_object":"y","error":{"code":-310000,"message":"USER_FILE_DOES_NOT_EXIST"}}"#;
+        let d: DataObject = serde_json::from_str(json).unwrap();
+        assert_eq!(d.error.as_ref().map(|e| e.code), Some(-310000));
+        assert_eq!(
+            d.error.as_ref().map(|e| e.message.as_str()),
+            Some("USER_FILE_DOES_NOT_EXIST")
+        );
+        assert_eq!(serde_json::to_string(&d).unwrap(), json);
     }
 
     // --- Operator ---

@@ -9,7 +9,7 @@
 use std::process::Command;
 
 use baton_rs::connection::ObjType;
-use baton_rs::operations::list::{list_one, ListOptions};
+use baton_rs::operations::list::{list_one, list_one_annotated, ListOptions};
 use baton_rs::types::{Collection, DataObject};
 use baton_rs::{RodsConnection, Target};
 
@@ -42,6 +42,7 @@ fn list_home_collection_returns_target_unchanged() {
         avus: None,
         access: None,
         timestamps: None,
+        error: None,
     });
 
     let result = list_one(&mut conn, input, &ListOptions::default()).expect("list_one");
@@ -91,6 +92,7 @@ fn list_data_object_with_size_and_checksum_flags() {
         access: None,
         replicates: None,
         timestamps: None,
+        error: None,
     });
 
     let opts = ListOptions {
@@ -142,6 +144,7 @@ fn list_data_object_without_flags_preserves_none_fields() {
         access: None,
         replicates: None,
         timestamps: None,
+        error: None,
     });
 
     let result = list_one(&mut conn, input, &ListOptions::default()).expect("list_one");
@@ -151,4 +154,35 @@ fn list_data_object_without_flags_preserves_none_fields() {
     };
     assert_eq!(d.size, None, "size stays None when flag is off");
     assert_eq!(d.checksum, None, "checksum stays None when flag is off");
+}
+
+#[test]
+fn list_one_annotated_annotates_error_for_missing_path() {
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: "/testZone/home/irods/definitely_not_here_baton_rs".to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    // Returns a Target (not a Result) — iRODS error is folded into the
+    // output's `error` field instead of propagated.
+    let result = list_one_annotated(&mut conn, input, &ListOptions::default());
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let err = c.error.as_ref().expect("error field populated");
+    // -310000 = USER_FILE_DOES_NOT_EXIST (same code we hit in the
+    // fail-fast smoke test before in-band annotation was wired).
+    assert_eq!(err.code, -310000, "got {:?}", err);
+    assert!(
+        err.message.starts_with("USER_FILE_DOES_NOT_EXIST"),
+        "expected USER_FILE_DOES_NOT_EXIST in message, got {:?}",
+        err.message
+    );
 }

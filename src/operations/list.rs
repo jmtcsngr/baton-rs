@@ -55,3 +55,27 @@ pub fn list_one(
 
     Ok(target)
 }
+
+/// Same as [`list_one`], but catches iRODS errors and emits the input
+/// annotated with an `"error"` field instead of propagating. The driving
+/// binary uses this so one bad input doesn't abort the entire stream.
+///
+/// JSON-parse errors and other non-iRODS failures stay fail-fast at the
+/// binary level — we can't annotate an input we couldn't parse in the
+/// first place.
+pub fn list_one_annotated(
+    conn: &mut RodsConnection,
+    target: Target,
+    opts: &ListOptions,
+) -> Target {
+    // Keep a copy we can annotate if list_one consumes and then errors.
+    let fallback = target.clone();
+    match list_one(conn, target, opts) {
+        Ok(t) => t,
+        Err(err) => {
+            let mut annotated = fallback;
+            annotated.set_error(err);
+            annotated
+        }
+    }
+}
