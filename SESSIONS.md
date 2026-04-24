@@ -72,23 +72,35 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 1 — Crate scaffold and JSON data model
 
-**Status:** in progress
+**Status:** completed on 2026-04-24
 
 **Goal:** Create the single crate with `src/bin/` stubs and define all JSON types with serde derives matching baton's schema.
 
 **Completed:**
-- `<fill in — e.g. types for DataObject, Avu, Acl, Replicate, Timestamp, BatonError>`
-- `<JSON round-trip unit tests against baton doc examples>`
-- `<stub src/bin/*.rs files so Cargo builds all 7 binaries>`
+- Pinned target baton version `6.0.0` in Project constants
+- Cross-cutting conventions recorded (error handling, logging, JSON ordering, short-form aliases)
+- `Cargo.toml` dependencies: `serde` (derive), `serde_json`, `thiserror`
+- `src/types.rs` — `IrodsPath`, `DataObject`, `Collection`, `Avu`, `Acl`, `AclLevel`, `Replicate`, `Timestamp`, `Operator`
+- `src/error.rs` — `BatonError` (`thiserror`-derived, matches baton's in-band error JSON shape)
+- `src/lib.rs` — re-exports the data model and the error type
+- Unit tests: JSON round-trip for every type, including AVU short-form / long-form and all 12 query operators
+- `src/bin/*.rs` — stub binaries for all 7 baton commands (`baton-list`, `baton-get`, `baton-put`, `baton-chmod`, `baton-metamod`, `baton-metaquery`, `baton-do`)
 
 **Deferred / known gaps:**
-- `<fill in>`
+- `contents` field on `Collection` not yet modelled — it's a mixed `DataObject` / `Collection` array and needs an untagged enum. Added in Session 3 when `baton-list --contents` first needs it.
+- `clap`, `anyhow`, `tracing`, `tracing-subscriber` dependencies not yet added — pulled into `Cargo.toml` in Session 3 when the first real binary wires them up.
+- `tests/placeholder.rs` still present; removed when real integration tests arrive (Session 3+).
 
 **Decisions made:**
-- `<fill in — especially error handling and logging conventions, copy into Cross-cutting conventions above>`
+- Pin baton 6.0.0 as the parity target (only 6.x release as of 2025-09-02).
+- Error handling: `thiserror` in library code; `anyhow` in `src/bin/*.rs` (applied from Session 3).
+- Logging: `tracing` + `tracing-subscriber`; wiring deferred to Session 3.
+- JSON conventions: serde default key order; structural comparison in compatibility tests.
+- Short-form aliases: serde `alias` attribute; emit long form (`attribute`/`value`/`units`) on serialise.
 
 **Open questions for next session:**
-- `<fill in>`
+- Confirm exact iRODS headers to bindgen against (`rodsClient.h` as the top-level entry point). Handled in Session 2.
+- Feature-flag strategy for iRODS 4.x vs 5.x headers — revisit once FFI takes shape.
 
 ---
 
@@ -256,3 +268,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 
 - `2026-04-23` — SESSIONS.md template created; Project constants filled in (Session 0).
 - `2026-04-24` — Session 0 completed: CI green across iRODS 4.2.7/4.3.4/4.3.5 matrix.
+- `2026-04-24` — Session 1 completed: JSON data model and stub binaries.
