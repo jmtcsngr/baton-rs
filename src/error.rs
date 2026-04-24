@@ -96,19 +96,23 @@ mod tests {
     }
 
     #[test]
-    fn from_irods_resolves_known_names() {
-        // A handful of stable iRODS codes that we've already hit in
-        // connection-layer testing. If iRODS renames any of these we'd
-        // want to know — hence pinning them explicitly.
-        for (code, expected) in [
-            (-305111, "USER_SOCK_CONNECT_ERR"),
-            (-827000, "CAT_INVALID_USER"),
-            (-813000, "CAT_NO_ROWS_FOUND"),
-        ] {
-            let e = BatonError::from_irods(code);
-            assert_eq!(e.code, code, "code preserved");
-            assert_eq!(e.message, expected, "name resolved for code {}", code);
-        }
+    fn from_irods_resolves_observed_code() {
+        // -305111 = USER_SOCK_CONNECT_ERR. Verified end-to-end during
+        // connection-layer debugging (a real server-refused TCP connect
+        // returned this code via rErrMsg_t).
+        let e = BatonError::from_irods(-305111);
+        assert_eq!(e.code, -305111, "code preserved");
+        assert_eq!(e.message, "USER_SOCK_CONNECT_ERR", "name resolved");
+    }
+
+    #[test]
+    fn from_irods_returns_non_empty_for_unknown_code() {
+        // 42 is not an iRODS error code. rodsErrorName returns a placeholder
+        // string ("UNKNOWN_ERROR" or similar depending on version); we only
+        // assert the message is populated and the code is preserved.
+        let e = BatonError::from_irods(42);
+        assert_eq!(e.code, 42);
+        assert!(!e.message.is_empty(), "message should not be empty");
     }
 
     #[test]

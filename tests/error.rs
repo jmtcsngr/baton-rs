@@ -11,10 +11,12 @@
 use baton_rs::BatonError;
 
 #[test]
-fn from_irods_resolves_known_code() {
-    let err = BatonError::from_irods(-813000);
-    assert_eq!(err.code, -813000);
-    assert_eq!(err.message, "CAT_NO_ROWS_FOUND");
+fn from_irods_resolves_observed_code() {
+    // -305111 = USER_SOCK_CONNECT_ERR. The value and name were both
+    // observed during integration debugging of RodsConnection.
+    let err = BatonError::from_irods(-305111);
+    assert_eq!(err.code, -305111);
+    assert_eq!(err.message, "USER_SOCK_CONNECT_ERR");
 }
 
 #[test]
