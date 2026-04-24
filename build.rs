@@ -38,6 +38,7 @@ fn main() {
         .allowlist_function("getRodsEnv")
         .allowlist_function("obfGetPw")
         .allowlist_function("rErrMsg")
+        .allowlist_function("rodsErrorName")
         // Types referenced by those functions.
         .allowlist_type("rcComm_t")
         .allowlist_type("rodsEnv")

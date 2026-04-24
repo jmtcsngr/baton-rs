@@ -39,10 +39,7 @@ impl RodsConnection {
         let mut env = MaybeUninit::<ffi::rodsEnv>::zeroed();
         let env_status = unsafe { ffi::getRodsEnv(env.as_mut_ptr()) };
         if env_status != 0 {
-            return Err(BatonError {
-                code: env_status,
-                message: "getRodsEnv failed".to_string(),
-            });
+            return Err(BatonError::from_irods(env_status));
         }
         let env = unsafe { env.assume_init() };
 
@@ -65,14 +62,7 @@ impl RodsConnection {
             let msg = unsafe { CStr::from_ptr(err_msg.msg.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
-            return Err(BatonError {
-                code: err_msg.status,
-                message: if msg.is_empty() {
-                    format!("rcConnect failed with status {}", err_msg.status)
-                } else {
-                    msg
-                },
-            });
+            return Err(BatonError::from_irods_with_context(err_msg.status, &msg));
         }
 
         Ok(Self { conn })
@@ -106,26 +96,17 @@ impl RodsConnection {
 
         let status = unsafe { ffi::obfGetPw(password.as_mut_ptr()) };
         if status != 0 {
-            return Err(BatonError {
-                code: status,
-                message: format!(
-                    "obfGetPw failed with status {} (is .irodsA present?)",
-                    status
-                ),
-            });
+            return Err(BatonError::from_irods_with_context(
+                status,
+                "obfGetPw failed (is .irodsA present?)",
+            ));
         }
 
         let status = unsafe {
             ffi::clientLoginWithPassword(self.conn, password.as_mut_ptr())
         };
         if status != 0 {
-            return Err(BatonError {
-                code: status,
-                message: format!(
-                    "clientLoginWithPassword failed with status {}",
-                    status
-                ),
-            });
+            return Err(BatonError::from_irods(status));
         }
 
         Ok(())
