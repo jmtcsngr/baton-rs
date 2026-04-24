@@ -36,27 +36,33 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 0 — Infrastructure
 
-**Status:** in progress
+**Status:** completed on 2026-04-24
 
 **Goal:** Stand up CI, publish workflow, Dependabot, devcontainer, and publish Dockerfile. No Rust code written yet; stub Cargo manifest only.
 
 **Completed:**
 - `Cargo.toml` stub (name, edition, license; no `[[bin]]` yet)
-- `.github/workflows/unit-tests.yml` — iRODS 4.2.7 / 4.3.4 / 4.3.5 matrix
+- `.github/workflows/unit-tests.yml` — iRODS 4.2.7 / 4.3.4 / 4.3.5 matrix, all three green
 - `.github/workflows/publish.yml` — publishes to `ghcr.io/jmtcsngr/baton-rs` on tag push
 - `.github/dependabot.yml` — Cargo (weekly), GitHub Actions (weekly), Docker (monthly)
 - `.devcontainer/devcontainer.json` + `.devcontainer/setup.sh`
 - `docker/build.sh`, `docker/build-release.sh`, `docker/Dockerfile`
+- `LICENSE` (GPL-2.0, matches upstream baton's COPYING)
+- `.gitignore` (Rust `target/` + editor backups)
+- `README.md` (minimal landing page)
+- CI authentication fixed: user `irods`, `iinit` via `script` pseudo-TTY
+- Stubs to unblock CI: empty `src/lib.rs`, placeholder `tests/placeholder.rs` (both replaced in Session 1)
 
 **Deferred / known gaps:**
-- `cargo check` not run locally (cargo not installed); will be verified by CI on first push
-- iRODS runtime package version in `docker/Dockerfile` pinned to `4.3.5-0~jammy` per PLAN.md;
-  confirm with `apt-cache policy irods-runtime` inside build image if any doubt
+- `src/lib.rs` is empty; `tests/placeholder.rs` is a single trivial test. Both to be replaced in Session 1.
+- Publish workflow has never fired (tag-only trigger). First exercised when Session 8 cuts a release.
+- iRODS 5.x not in CI matrix yet (deferred to Session 8 as `experimental: true`).
 
 **Decisions made:**
 - Publish image: `ubuntu:22.04` (matches build image, iRODS `.deb` packages install cleanly)
 - License: `GPL-2.0` (matches upstream baton)
 - Linking: dynamic against iRODS client libraries
+- iRODS test credentials: user `irods`, password `irods`, zone `testZone` (per upstream baton CI)
 
 **Open questions for next session:**
 - Pin exact baton 6.x point release (e.g. `6.0.0`) in Project constants above
@@ -249,3 +255,4 @@ Paste the following at the start of each session, with the placeholders filled i
 Use this space to record non-trivial changes to the plan itself — e.g. changing the target version, dropping a session, reworking CI.
 
 - `2026-04-23` — SESSIONS.md template created; Project constants filled in (Session 0).
+- `2026-04-24` — Session 0 completed: CI green across iRODS 4.2.7/4.3.4/4.3.5 matrix.
