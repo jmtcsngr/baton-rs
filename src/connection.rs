@@ -15,7 +15,7 @@
 //! not safe to share across threads, and the raw-pointer field makes
 //! `RodsConnection` `!Send` and `!Sync` automatically.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 
 use crate::error::BatonError;
@@ -81,14 +81,17 @@ impl RodsConnection {
     /// Authenticate the connection using the auth token produced by `iinit`
     /// (default location: `$HOME/.irods/.irodsA`).
     ///
-    /// Must be called after [`Self::connect_from_env`] and before any
-    /// iRODS operation that requires an authenticated session. Passing
-    /// NULL for both optional arguments means "use the default auth file
-    /// and the default auth scheme (native)", matching how the iRODS
-    /// icommands behave.
+    /// Must be called after [`Self::connect_from_env`] and before any iRODS
+    /// operation that requires an authenticated session. The auth scheme is
+    /// fixed to `"native"` — on iRODS 4.3.x, passing NULL causes the client
+    /// to attempt the new unified-auth API (110000), which not every server
+    /// has registered. Other schemes (PAM, GSI, Kerberos) aren't in Session 2
+    /// scope.
     pub fn login(&mut self) -> Result<(), BatonError> {
+        // SAFETY: the literal "native" has no interior NUL.
+        let scheme = CString::new("native").unwrap();
         let status = unsafe {
-            ffi::clientLogin(self.conn, std::ptr::null(), std::ptr::null())
+            ffi::clientLogin(self.conn, std::ptr::null(), scheme.as_ptr())
         };
         if status != 0 {
             return Err(BatonError {
