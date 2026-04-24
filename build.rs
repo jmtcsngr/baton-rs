@@ -39,10 +39,17 @@ fn main() {
         .allowlist_function("obfGetPw")
         .allowlist_function("rErrMsg")
         .allowlist_function("rodsErrorName")
+        // Stat — the primitive baton-list uses to confirm a path exists and
+        // to read size / checksum without a full catalog query.
+        .allowlist_function("rcObjStat")
+        .allowlist_function("freeRodsObjStat")
         // Types referenced by those functions.
         .allowlist_type("rcComm_t")
         .allowlist_type("rodsEnv")
         .allowlist_type("rErrMsg_t")
+        .allowlist_type("dataObjInp_t")
+        .allowlist_type("rodsObjStat_t")
+        .allowlist_type("objType_t")
         // Error code constants used when translating iRODS codes into
         // BatonError. The allowlist is broad on purpose — constants are cheap.
         .allowlist_var("CAT_.*")
