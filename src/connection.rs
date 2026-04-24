@@ -15,7 +15,7 @@
 //! not safe to share across threads, and the raw-pointer field makes
 //! `RodsConnection` `!Send` and `!Sync` automatically.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::mem::MaybeUninit;
 
 use crate::error::BatonError;
@@ -79,26 +79,55 @@ impl RodsConnection {
     }
 
     /// Authenticate the connection using the auth token produced by `iinit`
-    /// (default location: `$HOME/.irods/.irodsA`).
+    /// at `$HOME/.irods/.irodsA`.
     ///
-    /// Must be called after [`Self::connect_from_env`] and before any iRODS
-    /// operation that requires an authenticated session. The auth scheme is
-    /// fixed to `"native"` — on iRODS 4.3.x, passing NULL causes the client
-    /// to attempt the new unified-auth API (110000), which not every server
-    /// has registered. Other schemes (PAM, GSI, Kerberos) aren't in Session 2
-    /// scope.
-    pub fn login(&mut self) -> Result<(), BatonError> {
-        // SAFETY: the literal "native" has no interior NUL.
-        let scheme = CString::new("native").unwrap();
+    /// Deliberately avoids `clientLogin`. On iRODS 4.3.x, `clientLogin`
+    /// probes the server's auth API table by sending
+    /// `AUTHENTICATE_CLIENT_AN` (API 110000) before selecting a scheme,
+    /// and not every 4.3.5 server image has that API registered — so
+    /// `clientLogin` fails even in environments where `ils` and the other
+    /// icommands authenticate fine.
+    ///
+    /// The flow here instead matches what `iinit`/`ils` do under the
+    /// hood:
+    ///
+    /// 1. `obfGetPw` reads and deobfuscates the `.irodsA` file into a
+    ///    plaintext password buffer.
+    /// 2. `clientLoginWithPassword` runs the legacy native auth handshake
+    ///    (`rcAuthRequest` → MD5(challenge + password) → `rcAuthResponse`)
+    ///    without touching API 110000.
+    ///
+    /// Only native auth is supported in Session 2. PAM/GSI/Kerberos and
+    /// interactive-password flows are out of scope and would land as
+    /// separate methods in whichever session first needs them.
+    pub fn login_from_auth_file(&mut self) -> Result<(), BatonError> {
+        // MAX_PASSWORD_LEN is 50 in iRODS; sized generously here.
+        let mut password: [std::os::raw::c_char; 128] = [0; 128];
+
+        let status = unsafe { ffi::obfGetPw(password.as_mut_ptr()) };
+        if status != 0 {
+            return Err(BatonError {
+                code: status,
+                message: format!(
+                    "obfGetPw failed with status {} (is .irodsA present?)",
+                    status
+                ),
+            });
+        }
+
         let status = unsafe {
-            ffi::clientLogin(self.conn, std::ptr::null(), scheme.as_ptr())
+            ffi::clientLoginWithPassword(self.conn, password.as_mut_ptr())
         };
         if status != 0 {
             return Err(BatonError {
                 code: status,
-                message: format!("clientLogin failed with status {}", status),
+                message: format!(
+                    "clientLoginWithPassword failed with status {}",
+                    status
+                ),
             });
         }
+
         Ok(())
     }
 }

@@ -34,7 +34,9 @@ fn main() {
         .allowlist_function("rcConnect")
         .allowlist_function("rcDisconnect")
         .allowlist_function("clientLogin")
+        .allowlist_function("clientLoginWithPassword")
         .allowlist_function("getRodsEnv")
+        .allowlist_function("obfGetPw")
         .allowlist_function("rErrMsg")
         // Types referenced by those functions.
         .allowlist_type("rcComm_t")

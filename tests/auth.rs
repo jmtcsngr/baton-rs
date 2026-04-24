@@ -13,7 +13,7 @@ use baton_rs::RodsConnection;
 #[test]
 fn connect_and_login() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
-    conn.login().expect("login");
+    conn.login_from_auth_file().expect("login_from_auth_file");
     // Drop runs rcDisconnect regardless of whether we logged in, so
     // there's no explicit logout step to exercise.
 }
