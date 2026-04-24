@@ -8,6 +8,7 @@
 //! See `PLAN.md` at the repository root for the multi-session implementation plan.
 
 pub mod error;
+pub(crate) mod ffi;
 pub mod types;
 
 pub use error::BatonError;
