@@ -17,9 +17,15 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=wrapper.h");
 
-    // Link dynamically against the iRODS client library provided by the
+    // Link dynamically against the iRODS client libraries provided by the
     // iRODS .deb packages (decision recorded in Project constants).
+    //
+    // iRODS splits its client runtime across at least two shared objects:
+    //   - libirods_client — connection/protocol APIs (rcConnect, clientLogin, …)
+    //   - libirods_common — utilities, including getRodsEnv
+    // If more symbols surface as undefined later, switch to pkg-config.
     println!("cargo:rustc-link-lib=irods_client");
+    println!("cargo:rustc-link-lib=irods_common");
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
