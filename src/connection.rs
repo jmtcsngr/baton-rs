@@ -31,11 +31,17 @@ impl RodsConnection {
     /// `$HOME/.irods/irods_environment.json`.
     ///
     /// Performs the TCP handshake and iRODS version negotiation only.
-    /// Authentication (`clientLogin`) is a separate step handled by a later
-    /// commit in this session; calling iRODS APIs that require auth before
-    /// then will fail at the server.
+    /// Call [`Self::login_from_auth_file`] afterwards for any iRODS
+    /// operation that requires an authenticated session.
     pub fn connect_from_env() -> Result<Self, BatonError> {
-        // Load the iRODS environment file.
+        let conn = Self::open_raw()?;
+        Ok(Self { conn })
+    }
+
+    /// Internal: open a fresh `rcComm_t *` using the iRODS environment
+    /// file. Shared between [`Self::connect_from_env`] and
+    /// [`Self::reconnect`] so both use the same connect parameters.
+    fn open_raw() -> Result<*mut ffi::rcComm_t, BatonError> {
         let mut env = MaybeUninit::<ffi::rodsEnv>::zeroed();
         let env_status = unsafe { ffi::getRodsEnv(env.as_mut_ptr()) };
         if env_status != 0 {
@@ -43,8 +49,6 @@ impl RodsConnection {
         }
         let env = unsafe { env.assume_init() };
 
-        // Open the connection. reconnFlag=0 here; the explicit reconnect
-        // helper arrives in a later commit.
         let mut err_msg = MaybeUninit::<ffi::rErrMsg_t>::zeroed();
         let conn = unsafe {
             ffi::rcConnect(
@@ -52,7 +56,7 @@ impl RodsConnection {
                 env.rodsPort,
                 env.rodsUserName.as_ptr(),
                 env.rodsZone.as_ptr(),
-                0,
+                0, // reconnFlag
                 err_msg.as_mut_ptr(),
             )
         };
@@ -65,7 +69,38 @@ impl RodsConnection {
             return Err(BatonError::from_irods_with_context(err_msg.status, &msg));
         }
 
-        Ok(Self { conn })
+        Ok(conn)
+    }
+
+    /// Tear down the current connection and build a fresh one in its
+    /// place, re-authenticating via [`Self::login_from_auth_file`].
+    ///
+    /// Use this after an idle period or a transient network failure.
+    /// Session 3+ will drive it from the `--connect-time` CLI flag;
+    /// here it's a manually-invoked helper that forms the building
+    /// block for that.
+    ///
+    /// On failure the connection pointer is left null (from the
+    /// disconnect step), so it's always safe to drop the
+    /// [`RodsConnection`] after a failed reconnect.
+    pub fn reconnect(&mut self) -> Result<(), BatonError> {
+        // Close the current connection. rcDisconnect's return is a
+        // status we have nothing useful to do with on the teardown path.
+        if !self.conn.is_null() {
+            unsafe {
+                ffi::rcDisconnect(self.conn);
+            }
+            self.conn = std::ptr::null_mut();
+        }
+
+        // Open a new raw connection. Leaves self.conn null on failure,
+        // matching the "always safe to drop" contract above.
+        self.conn = Self::open_raw()?;
+
+        // Re-authenticate. The server drops session state on disconnect,
+        // so a fresh login is mandatory — the caller doesn't have to
+        // remember to call login_from_auth_file again.
+        self.login_from_auth_file()
     }
 
     /// Authenticate the connection using the auth token produced by `iinit`
