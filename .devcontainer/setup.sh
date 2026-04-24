@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Install libclang (required by bindgen for FFI generation — Session 2 onward).
+sudo apt-get update -y
+sudo apt-get install -y --no-install-recommends libclang-dev
+
 # Start a local iRODS server sidecar
 docker run -d --name irods-server \
   -p 1247:1247 \

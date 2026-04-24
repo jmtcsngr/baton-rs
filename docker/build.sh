@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Install libclang (required by bindgen for FFI generation — Session 2 onward).
+apt-get update -y
+apt-get install -y --no-install-recommends libclang-dev
+
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
   | sh -s -- -y --default-toolchain stable --no-modify-path
