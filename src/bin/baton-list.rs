@@ -5,16 +5,17 @@
 
 //! `baton-list` — list iRODS data objects and collections.
 //!
-//! Session 3a scaffolds the CLI harness, NDJSON streaming loop, and
-//! tracing initialisation. The listing flags (`--size`, `--checksum`,
-//! `--avu`, ...) are all accepted by clap so the CLI surface stays
-//! stable across 3a/3b/3c, but at this point each line is echoed
-//! through unchanged — `rcObjStat` wiring lands in the next two
-//! commits.
+//! Session 3a wires the full harness end-to-end: clap-parsed flags, tracing
+//! initialised to stderr, live `RodsConnection` opened once for the whole
+//! stream, and per-line dispatch into `operations::list::list_one`. At this
+//! point `list_one` only stats the path (no flag effects yet — those land
+//! in the next commits).
 
 use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result};
+use baton_rs::operations::list::{self, ListOptions};
+use baton_rs::{RodsConnection, Target};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -68,11 +69,21 @@ impl Args {
             "info"
         }
     }
+
+    fn to_options(&self) -> ListOptions {
+        ListOptions {
+            size: self.size,
+            checksum: self.checksum,
+            avu: self.avu,
+            acl: self.acl,
+            replicate: self.replicate,
+            timestamp: self.timestamp,
+            contents: self.contents,
+        }
+    }
 }
 
 fn init_tracing(args: &Args) {
-    // `RUST_LOG` overrides the CLI flags if set — matches standard tracing
-    // behaviour so downstream debugging stays consistent.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(args.log_level()));
     tracing_subscriber::fmt()
@@ -85,6 +96,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(&args);
 
+    let opts = args.to_options();
+
+    let mut conn = RodsConnection::connect_from_env().context("connecting to iRODS")?;
+    conn.login_from_auth_file().context("authenticating")?;
+
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -95,13 +111,14 @@ fn main() -> Result<()> {
             continue;
         }
 
-        // Parse as a generic JSON value for now. Typed parsing into
-        // DataObject / Collection arrives alongside operations/list.rs
-        // in the next commit.
-        let value: serde_json::Value =
-            serde_json::from_str(&line).context("parsing input line as JSON")?;
+        let target: Target =
+            serde_json::from_str(&line).context("parsing input line as a Target")?;
 
-        serde_json::to_writer(&mut out, &value).context("writing output line")?;
+        // Session 3a: fail-fast on iRODS errors. In-band error annotation
+        // lands in the last commit of this branch.
+        let result = list::list_one(&mut conn, target, &opts)?;
+
+        serde_json::to_writer(&mut out, &result).context("writing output line")?;
         writeln!(&mut out).context("writing newline")?;
     }
 
