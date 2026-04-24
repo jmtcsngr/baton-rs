@@ -2,8 +2,11 @@
 set -euo pipefail
 
 # Install libclang (required by bindgen for FFI generation — Session 2 onward).
+# The `clang` driver package is installed alongside `libclang-dev` so libclang
+# can locate its own resource directory; without it, Ubuntu 16.04 builds fail
+# with "'stddef.h' file not found" when bindgen preprocesses system headers.
 apt-get update -y
-apt-get install -y --no-install-recommends libclang-dev
+apt-get install -y --no-install-recommends libclang-dev clang
 
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
