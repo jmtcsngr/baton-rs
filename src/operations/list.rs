@@ -299,11 +299,16 @@ fn fetch_replicates(
     let mut inp = new_query_inp();
     let inp_ref = unsafe { inp.assume_init_mut() };
 
+    // Naming inconsistency note: iRODS 4.3.5's bindings expose this set
+    // as a mix of long-form (COL_DATA_REPL_NUM) and short-form
+    // (COL_D_DATA_CHECKSUM / COL_D_RESC_NAME / COL_D_REPL_STATUS) — not a
+    // typo, that's actually how the headers are. Compiler "similar name"
+    // hints were the source of truth.
     add_select(inp_ref, ffi::COL_DATA_REPL_NUM as i32);
-    add_select(inp_ref, ffi::COL_DATA_CHECKSUM as i32);
+    add_select(inp_ref, ffi::COL_D_DATA_CHECKSUM as i32);
     add_select(inp_ref, ffi::COL_R_LOC as i32);
-    add_select(inp_ref, ffi::COL_DATA_RESC_NAME as i32);
-    add_select(inp_ref, ffi::COL_DATA_REPL_STATUS as i32);
+    add_select(inp_ref, ffi::COL_D_RESC_NAME as i32);
+    add_select(inp_ref, ffi::COL_D_REPL_STATUS as i32);
 
     add_where(
         inp_ref,
