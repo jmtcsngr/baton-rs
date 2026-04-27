@@ -116,12 +116,16 @@ fn add_where(
 /// Run a populated input and always clear it before returning, regardless
 /// of whether the query succeeded — `clearGenQueryInp` frees the
 /// strdup'd condition / select buffers.
+///
+/// iRODS declares `clearGenQueryInp` with a generic `void *` parameter
+/// (it shares the signature with other `clearXxx` helpers). bindgen
+/// reflects that faithfully; we cast through `*mut _` here.
 fn run_query(
     conn: &mut RodsConnection,
     inp: &mut ffi::genQueryInp_t,
 ) -> Result<Vec<Vec<String>>, BatonError> {
     let result = conn.query(inp);
-    unsafe { ffi::clearGenQueryInp(inp) };
+    unsafe { ffi::clearGenQueryInp(inp as *mut _ as *mut std::os::raw::c_void) };
     result
 }
 

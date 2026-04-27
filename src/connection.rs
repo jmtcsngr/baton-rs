@@ -187,7 +187,13 @@ impl RodsConnection {
 
             // A successful query that matched no rows returns
             // CAT_NO_ROWS_FOUND (-808000). Report as empty, not an error.
-            if status as i32 == ffi::CAT_NO_ROWS_FOUND as i32 {
+            //
+            // bindgen doesn't surface the constant from rodsClient.h's
+            // transitive includes — the symbol must live behind a header
+            // that wrapper.h doesn't reach. Hardcode the well-known value
+            // rather than expanding wrapper.h for one constant.
+            const CAT_NO_ROWS_FOUND: i32 = -808000;
+            if status == CAT_NO_ROWS_FOUND {
                 return Ok(rows);
             }
             if status < 0 {
