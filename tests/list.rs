@@ -397,7 +397,6 @@ fn list_collection_with_acl() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
 
-    // Home collection always has at least the owner with `own` access.
     let input = Target::Collection(Collection {
         collection: "/testZone/home/irods".to_string(),
         avus: None,
@@ -416,11 +415,19 @@ fn list_collection_with_acl() {
         _ => panic!("expected Collection"),
     };
     let access = c.access.as_ref().expect("access populated");
-    let owner_acl = access
-        .iter()
-        .find(|a| a.owner == "irods")
-        .expect("owner ACL present");
-    assert_eq!(owner_acl.level, AclLevel::Own);
+
+    // Whichever server-policy combination of (user, rodsadmin group, ...)
+    // owns the home collection, there must be at least one Own-level
+    // entry. The devcontainer image lists the `irods` user directly; the
+    // CI image lists only `rodsadmin` (with the user inheriting access
+    // through group membership). Don't pin a specific owner — assert the
+    // shape that actually matters for the catalog-query plumbing.
+    assert!(!access.is_empty(), "expected ACL entries on home collection");
+    assert!(
+        access.iter().any(|a| a.level == AclLevel::Own),
+        "expected at least one Own-level entry, got {:?}",
+        access
+    );
 }
 
 #[test]
