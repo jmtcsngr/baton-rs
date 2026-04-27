@@ -14,7 +14,7 @@ use std::mem::MaybeUninit;
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
 use crate::ffi;
-use crate::types::{Acl, AclLevel, Avu, DataObject, Replicate, Target};
+use crate::types::{Acl, AclLevel, Avu, DataObject, Replicate, Target, Timestamp};
 
 /// Which optional fields the caller wants populated in the output.
 #[derive(Debug, Default, Clone, Copy)]
@@ -78,6 +78,14 @@ pub fn list_one(
     if opts.replicate {
         if let Target::DataObject(d) = &mut target {
             d.replicates = Some(fetch_replicates(conn, d)?);
+        }
+    }
+
+    if opts.timestamp {
+        let timestamps = fetch_timestamps(conn, &target)?;
+        match &mut target {
+            Target::DataObject(d) => d.timestamps = Some(timestamps),
+            Target::Collection(c) => c.timestamps = Some(timestamps),
         }
     }
 
@@ -345,6 +353,77 @@ fn fetch_replicates(
             })
         })
         .collect()
+}
+
+/// Fetch the create/modify timestamps for a target.
+///
+/// Each catalog row carries both timestamps for the same scope (per-replica
+/// for a data object, single per-collection). We fan out to two
+/// [`Timestamp`] entries per row — one with `created`, one with `modified`
+/// — so the JSON output matches baton's per-event shape.
+fn fetch_timestamps(
+    conn: &mut RodsConnection,
+    target: &Target,
+) -> Result<Vec<Timestamp>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    let with_replicate = matches!(target, Target::DataObject(_));
+
+    match target {
+        Target::DataObject(d) => {
+            // Data object: per-replica timestamps. SELECT order matches the
+            // row indices we read out below.
+            add_select(inp_ref, ffi::COL_D_CREATE_TIME as i32);
+            add_select(inp_ref, ffi::COL_D_MODIFY_TIME as i32);
+            add_select(inp_ref, ffi::COL_DATA_REPL_NUM as i32);
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.collection)),
+            )?;
+            add_where(
+                inp_ref,
+                ffi::COL_DATA_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.data_object)),
+            )?;
+        }
+        Target::Collection(c) => {
+            add_select(inp_ref, ffi::COL_COLL_CREATE_TIME as i32);
+            add_select(inp_ref, ffi::COL_COLL_MODIFY_TIME as i32);
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&c.collection)),
+            )?;
+        }
+    }
+
+    let rows = run_query(conn, inp_ref)?;
+
+    let mut timestamps = Vec::with_capacity(rows.len() * 2);
+    for row in rows {
+        let created = row.first().cloned().unwrap_or_default();
+        let modified = row.get(1).cloned().unwrap_or_default();
+        let replicate = if with_replicate {
+            row.get(2)
+                .and_then(|s| s.parse::<u32>().ok())
+        } else {
+            None
+        };
+
+        timestamps.push(Timestamp {
+            created: Some(created),
+            modified: None,
+            replicate,
+        });
+        timestamps.push(Timestamp {
+            created: None,
+            modified: Some(modified),
+            replicate,
+        });
+    }
+    Ok(timestamps)
 }
 
 fn parse_acl_level(s: &str) -> Result<AclLevel, BatonError> {

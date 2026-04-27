@@ -501,6 +501,106 @@ fn list_collection_replicate_flag_is_silently_ignored() {
 }
 
 #[test]
+fn list_data_object_with_timestamp() {
+    let local = "/tmp/baton_rs_test_file_ts";
+    std::fs::write(local, b"timestamp test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_ts";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        timestamp: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let timestamps = d.timestamps.as_ref().expect("timestamps populated");
+    // One replica → one created entry + one modified entry.
+    assert_eq!(timestamps.len(), 2, "got {:?}", timestamps);
+
+    // We don't assert exact values (iRODS returns padded epoch strings,
+    // and the actual time depends on when the test runs); we assert
+    // shape: each entry has exactly one of created/modified populated,
+    // and the replicate number is 0 for both.
+    let created = timestamps
+        .iter()
+        .find(|t| t.created.is_some())
+        .expect("created entry present");
+    assert_eq!(created.modified, None);
+    assert_eq!(created.replicate, Some(0));
+    assert!(
+        !created.created.as_ref().unwrap().is_empty(),
+        "created timestamp non-empty"
+    );
+
+    let modified = timestamps
+        .iter()
+        .find(|t| t.modified.is_some())
+        .expect("modified entry present");
+    assert_eq!(modified.created, None);
+    assert_eq!(modified.replicate, Some(0));
+    assert!(
+        !modified.modified.as_ref().unwrap().is_empty(),
+        "modified timestamp non-empty"
+    );
+}
+
+#[test]
+fn list_collection_with_timestamp() {
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: "/testZone/home/irods".to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        timestamp: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let timestamps = c.timestamps.as_ref().expect("timestamps populated");
+    assert_eq!(timestamps.len(), 2, "got {:?}", timestamps);
+
+    // Collections have no per-replica timestamps; the replicate field
+    // should be None on both entries.
+    for t in timestamps {
+        assert_eq!(t.replicate, None);
+    }
+    assert!(timestamps.iter().any(|t| t.created.is_some()));
+    assert!(timestamps.iter().any(|t| t.modified.is_some()));
+}
+
+#[test]
 fn list_one_annotated_annotates_error_for_missing_path() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
