@@ -113,8 +113,20 @@ pub fn list_one(
 const QUERY_PAGE_SIZE: i32 = 500;
 
 /// Escape single quotes for inclusion in a genQuery WHERE-clause literal.
-/// Paths and metadata values can legitimately contain `'`; the iRODS query
-/// parser accepts the SQL-style `''` doubled form.
+///
+/// Paths and metadata values can legitimately contain `'`; the iRODS
+/// query parser accepts the SQL-style `''` doubled form. Upstream baton
+/// uses the same approach, and iRODS's genQuery has no parameterised-
+/// query equivalent of SQL prepared statements, so this is the
+/// available defence against catalog-query injection from caller-
+/// supplied collection / data-object / AVU strings.
+///
+/// Other special characters (backslash, NUL, wildcards) are not escaped:
+/// `CString::new` already rejects interior NULs at the FFI boundary,
+/// and iRODS's parser is not documented to give backslash any special
+/// meaning inside literals. If a future iRODS release changes that, the
+/// catalog would refuse the query rather than silently mis-route it —
+/// the caller still gets an error rather than wrong data.
 fn sql_escape(s: &str) -> String {
     s.replace('\'', "''")
 }

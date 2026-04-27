@@ -295,6 +295,8 @@ impl RodsConnection {
 
         let status = unsafe { ffi::obfGetPw(password.as_mut_ptr()) };
         if status != 0 {
+            // password is still all-zero from the array initialiser; no
+            // sensitive bytes to scrub on this path.
             return Err(BatonError::from_irods_with_context(
                 status,
                 "obfGetPw failed (is .irodsA present?)",
@@ -304,6 +306,17 @@ impl RodsConnection {
         let status = unsafe {
             ffi::clientLoginWithPassword(self.conn, password.as_mut_ptr())
         };
+
+        // Zero the password buffer regardless of the login outcome.
+        // Stack arrays aren't auto-zeroed at function exit, so leaving
+        // the plaintext sitting on the stack would extend the window of
+        // exposure to anything inspecting process memory (panic
+        // unwinders, core dumps, attached debuggers). write_volatile
+        // prevents the compiler from optimising the writes away.
+        for byte in password.iter_mut() {
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+
         if status != 0 {
             return Err(BatonError::from_irods(status));
         }
