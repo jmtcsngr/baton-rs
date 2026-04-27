@@ -231,19 +231,31 @@ fn fetch_avus(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Avu>, Ba
         .collect())
 }
 
-/// Fetch the ACL entries attached to a target. iRODS auto-joins the user
-/// table when both `COL_USER_*` and an access-name column appear in the
-/// same query, so we can read user, zone, and access level in one row.
+/// Fetch the ACL entries attached to a target.
+///
+/// Collection ACLs need the *collection-specific* user-name and zone
+/// columns (`COL_COLL_USER_NAME` / `COL_COLL_USER_ZONE`) — the generic
+/// `COL_USER_NAME` / `COL_USER_ZONE` columns join via the data-access
+/// path, so on a collection input they yield zero rows. baton's own
+/// source uses the same split.
 fn fetch_acl(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Acl>, BatonError> {
     let mut inp = new_query_inp();
     let inp_ref = unsafe { inp.assume_init_mut() };
 
-    let col_access_name = match target {
-        Target::DataObject(_) => ffi::COL_DATA_ACCESS_NAME as i32,
-        Target::Collection(_) => ffi::COL_COLL_ACCESS_NAME as i32,
+    let (col_user_name, col_user_zone, col_access_name) = match target {
+        Target::DataObject(_) => (
+            ffi::COL_USER_NAME as i32,
+            ffi::COL_USER_ZONE as i32,
+            ffi::COL_DATA_ACCESS_NAME as i32,
+        ),
+        Target::Collection(_) => (
+            ffi::COL_COLL_USER_NAME as i32,
+            ffi::COL_COLL_USER_ZONE as i32,
+            ffi::COL_COLL_ACCESS_NAME as i32,
+        ),
     };
-    add_select(inp_ref, ffi::COL_USER_NAME as i32);
-    add_select(inp_ref, ffi::COL_USER_ZONE as i32);
+    add_select(inp_ref, col_user_name);
+    add_select(inp_ref, col_user_zone);
     add_select(inp_ref, col_access_name);
 
     match target {
