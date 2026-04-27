@@ -13,12 +13,14 @@ use baton_rs::operations::list::{list_one, list_one_annotated, ListOptions};
 use baton_rs::types::{AclLevel, Collection, DataObject};
 use baton_rs::{RodsConnection, Target};
 
-/// Drop-guard that removes a remote iRODS path via `irm -f` on Drop,
-/// so the test stays idempotent even if its assertions panic.
+/// Drop-guard that removes a remote iRODS path via `irm -r -f` on Drop,
+/// so the test stays idempotent even if its assertions panic. The `-r`
+/// flag is harmless for leaf data objects and necessary when a test
+/// has populated a collection with children before tearing it down.
 struct IrodsCleanup(String);
 impl Drop for IrodsCleanup {
     fn drop(&mut self) {
-        let _ = Command::new("irm").args(["-f", &self.0]).status();
+        let _ = Command::new("irm").args(["-r", "-f", &self.0]).status();
     }
 }
 
@@ -617,6 +619,115 @@ fn list_collection_with_timestamp() {
     }
     assert!(timestamps.iter().any(|t| t.created.is_some()));
     assert!(timestamps.iter().any(|t| t.modified.is_some()));
+}
+
+#[test]
+fn list_collection_with_contents() {
+    // Stage a small tree:
+    //   /testZone/home/irods/baton_rs_contents_test/
+    //     ├── sub/                  (sub-collection)
+    //     └── file.txt              (data object)
+    let parent = "/testZone/home/irods/baton_rs_contents_test";
+    let _parent_cleanup = IrodsCleanup(parent.to_string());
+
+    let mkdir_status = Command::new("imkdir")
+        .args(["-p", parent])
+        .status()
+        .expect("failed to spawn imkdir");
+    assert!(mkdir_status.success(), "imkdir {} failed", parent);
+
+    let sub = format!("{}/sub", parent);
+    let mkdir_status = Command::new("imkdir")
+        .args(["-p", &sub])
+        .status()
+        .expect("failed to spawn imkdir");
+    assert!(mkdir_status.success(), "imkdir {} failed", sub);
+
+    let local = "/tmp/baton_rs_test_file_contents";
+    std::fs::write(local, b"contents test").expect("write");
+    let data_path = format!("{}/file.txt", parent);
+    iput_with_checksum(local, &data_path);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: parent.to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        contents: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        contents: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let items = c.contents.as_ref().expect("contents populated");
+
+    // The sub-collection and the data object should both be in the
+    // listing. Find each by content type rather than indexing —
+    // catalog order isn't guaranteed.
+    let sub_item = items
+        .iter()
+        .find(|i| matches!(i, Target::Collection(coll) if coll.collection == sub))
+        .unwrap_or_else(|| panic!("sub-collection in contents, got {:?}", items));
+    let _ = sub_item;
+
+    let data_item = items
+        .iter()
+        .find_map(|i| match i {
+            Target::DataObject(d) if d.data_object == "file.txt" => Some(d),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("data object in contents, got {:?}", items));
+    assert_eq!(
+        data_item.collection, parent,
+        "data object's collection field is the parent path"
+    );
+}
+
+#[test]
+fn list_data_object_contents_flag_is_silently_ignored() {
+    // baton's --contents only applies to collections; on a data object
+    // input it's a no-op. Confirm we don't panic or error.
+    let local = "/tmp/baton_rs_test_file_contents_ignored";
+    std::fs::write(local, b"x").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_contents_ignored";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        contents: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    // DataObject has no `contents` field; just verify we didn't error.
+    matches!(result, Target::DataObject(_));
 }
 
 #[test]
