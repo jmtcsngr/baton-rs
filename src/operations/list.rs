@@ -14,7 +14,7 @@ use std::mem::MaybeUninit;
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
 use crate::ffi;
-use crate::types::{Acl, AclLevel, Avu, Target};
+use crate::types::{Acl, AclLevel, Avu, DataObject, Replicate, Target};
 
 /// Which optional fields the caller wants populated in the output.
 #[derive(Debug, Default, Clone, Copy)]
@@ -70,6 +70,14 @@ pub fn list_one(
         match &mut target {
             Target::DataObject(d) => d.access = Some(acls),
             Target::Collection(c) => c.access = Some(acls),
+        }
+    }
+
+    // Replicates are a data-object concept; baton silently ignores
+    // --replicate on collections, and we follow suit.
+    if opts.replicate {
+        if let Target::DataObject(d) = &mut target {
+            d.replicates = Some(fetch_replicates(conn, d)?);
         }
     }
 
@@ -277,6 +285,63 @@ fn fetch_acl(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Acl>, Bat
 /// our JSON schema) prefer the compact `read` / `write`. Both forms are
 /// accepted here so behaviour is stable across iRODS server versions
 /// that have shipped slightly different strings.
+/// Fetch the replicas of a data object. Each row from the catalog becomes
+/// one [`Replicate`].
+///
+/// `valid` is derived from `COL_D_REPL_STATUS`: iRODS uses `1` for a good
+/// replica and `0` (or `4` mid-write, etc.) for not-good. We collapse
+/// anything other than literal `"1"` to `false` — matches baton's
+/// behaviour and keeps callers from having to know iRODS's status codes.
+fn fetch_replicates(
+    conn: &mut RodsConnection,
+    d: &DataObject,
+) -> Result<Vec<Replicate>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    add_select(inp_ref, ffi::COL_D_REPL_NUM as i32);
+    add_select(inp_ref, ffi::COL_D_DATA_CHECKSUM as i32);
+    add_select(inp_ref, ffi::COL_R_LOC as i32);
+    add_select(inp_ref, ffi::COL_D_RESC_NAME as i32);
+    add_select(inp_ref, ffi::COL_D_REPL_STATUS as i32);
+
+    add_where(
+        inp_ref,
+        ffi::COL_COLL_NAME as i32,
+        &format!("= '{}'", sql_escape(&d.collection)),
+    )?;
+    add_where(
+        inp_ref,
+        ffi::COL_DATA_NAME as i32,
+        &format!("= '{}'", sql_escape(&d.data_object)),
+    )?;
+
+    let rows = run_query(conn, inp_ref)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let number_str = row.first().cloned().unwrap_or_default();
+            let checksum = row.get(1).cloned().unwrap_or_default();
+            let location = row.get(2).cloned().unwrap_or_default();
+            let resource = row.get(3).cloned().unwrap_or_default();
+            let status = row.get(4).cloned().unwrap_or_default();
+
+            let number: u32 = number_str.parse().map_err(|_| BatonError {
+                code: -1,
+                message: format!("non-numeric replica number: {:?}", number_str),
+            })?;
+
+            Ok(Replicate {
+                checksum,
+                location,
+                resource,
+                number,
+                valid: status == "1",
+            })
+        })
+        .collect()
+}
+
 fn parse_acl_level(s: &str) -> Result<AclLevel, BatonError> {
     match s {
         "null" => Ok(AclLevel::Null),

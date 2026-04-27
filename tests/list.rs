@@ -424,6 +424,83 @@ fn list_collection_with_acl() {
 }
 
 #[test]
+fn list_data_object_with_replicate() {
+    let local = "/tmp/baton_rs_test_file_repl";
+    std::fs::write(local, b"replicate test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_repl";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        replicate: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let replicates = d.replicates.as_ref().expect("replicates populated");
+    assert!(!replicates.is_empty(), "expected at least one replica");
+
+    // Find replica 0 — every iput'd object has at least this one. We
+    // don't pin specific resource / location values because they vary
+    // by server policy (replResc on this image, but other resources are
+    // possible elsewhere).
+    let r0 = replicates
+        .iter()
+        .find(|r| r.number == 0)
+        .expect("replica 0 present");
+    assert!(!r0.resource.is_empty(), "resource set");
+    assert!(!r0.location.is_empty(), "location set");
+    assert!(r0.valid, "replica 0 should be valid right after iput");
+}
+
+#[test]
+fn list_collection_replicate_flag_is_silently_ignored() {
+    // baton's --replicate is a no-op on collections; we mirror that.
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: "/testZone/home/irods".to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        replicate: true,
+        ..Default::default()
+    };
+    // No panic, no error, nothing populated on the collection side.
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    match result {
+        Target::Collection(_) => {} // collections have no replicates field
+        _ => panic!("expected Collection"),
+    }
+}
+
+#[test]
 fn list_one_annotated_annotates_error_for_missing_path() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
