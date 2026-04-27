@@ -166,9 +166,6 @@ pub struct DataObject {
 }
 
 /// A collection in iRODS (a directory).
-///
-/// `contents` (the directory listing populated by `--contents`) arrives in a
-/// later commit alongside the mixed-item enum it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Collection {
     pub collection: String,
@@ -181,6 +178,12 @@ pub struct Collection {
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub timestamps: Option<Vec<Timestamp>>,
+
+    /// Direct children of this collection — populated by `--contents`.
+    /// Mixed list of data objects and sub-collections; each item carries
+    /// its own typed identity via the `Target` enum.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub contents: Option<Vec<Item>>,
 
     /// Populated by in-band error annotation when an operation fails for
     /// this specific input item.
@@ -200,6 +203,14 @@ pub enum Target {
     DataObject(DataObject),
     Collection(Collection),
 }
+
+/// One element of a collection's `contents` list.
+///
+/// Same on-the-wire shape as [`Target`] (data object vs sub-collection
+/// distinguished by presence of `data_object` on the JSON object), so we
+/// alias rather than duplicate the enum. `Vec<Item>` and `Vec<Target>`
+/// interoperate freely.
+pub type Item = Target;
 
 impl Target {
     /// The iRODS absolute path — what `rcObjStat` wants as input.
@@ -465,9 +476,52 @@ mod tests {
             avus: None,
             access: None,
             timestamps: None,
+            contents: None,
             error: None,
         };
         assert_eq!(Target::Collection(c).path(), "/z/home/u");
+    }
+
+    #[test]
+    fn collection_contents_round_trip_mixed_items() {
+        // Mixed listing: a sub-collection and a data object as direct
+        // children of the parent.
+        let json = r#"{"collection":"/z/home/u","contents":[{"collection":"/z/home/u/sub"},{"collection":"/z/home/u","data_object":"foo.txt"}]}"#;
+        let c: Collection = serde_json::from_str(json).unwrap();
+        let items = c.contents.as_ref().expect("contents populated");
+        assert_eq!(items.len(), 2);
+        // First child is a sub-collection.
+        match &items[0] {
+            Target::Collection(sub) => assert_eq!(sub.collection, "/z/home/u/sub"),
+            other => panic!("expected sub-collection, got {:?}", other),
+        }
+        // Second child is a data object.
+        match &items[1] {
+            Target::DataObject(d) => {
+                assert_eq!(d.collection, "/z/home/u");
+                assert_eq!(d.data_object, "foo.txt");
+            }
+            other => panic!("expected data object, got {:?}", other),
+        }
+        assert_eq!(serde_json::to_string(&c).unwrap(), json);
+    }
+
+    #[test]
+    fn collection_without_contents_omits_field_on_serialise() {
+        let c = Collection {
+            collection: "/z/home/u".to_string(),
+            avus: None,
+            access: None,
+            timestamps: None,
+            contents: None,
+            error: None,
+        };
+        // skip_serializing_if = "Option::is_none" keeps the field absent
+        // when nothing populates it — matches every other optional field.
+        assert_eq!(
+            serde_json::to_string(&c).unwrap(),
+            r#"{"collection":"/z/home/u"}"#
+        );
     }
 
     #[test]

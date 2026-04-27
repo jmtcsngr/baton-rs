@@ -105,6 +105,7 @@ fn list_home_collection_returns_target_unchanged() {
         avus: None,
         access: None,
         timestamps: None,
+        contents: None,
         error: None,
     });
 
@@ -324,6 +325,7 @@ fn list_collection_with_avus() {
         avus: None,
         access: None,
         timestamps: None,
+        contents: None,
         error: None,
     });
 
@@ -402,6 +404,7 @@ fn list_collection_with_acl() {
         avus: None,
         access: None,
         timestamps: None,
+        contents: None,
         error: None,
     });
 
@@ -492,6 +495,7 @@ fn list_collection_replicate_flag_is_silently_ignored() {
         avus: None,
         access: None,
         timestamps: None,
+        contents: None,
         error: None,
     });
 
@@ -590,6 +594,7 @@ fn list_collection_with_timestamp() {
         avus: None,
         access: None,
         timestamps: None,
+        contents: None,
         error: None,
     });
 
@@ -624,6 +629,7 @@ fn list_one_annotated_annotates_error_for_missing_path() {
         avus: None,
         access: None,
         timestamps: None,
+        contents: None,
         error: None,
     });
 
