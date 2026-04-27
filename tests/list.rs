@@ -32,6 +32,69 @@ fn iput_with_checksum(local: &str, remote: &str) {
     assert!(status.success(), "iput -K {} {} failed", local, remote);
 }
 
+/// `imeta add <kind_flag> <path> <attr> <value> [units]`: attach an AVU.
+/// `kind_flag` is `-d` for data objects, `-C` for collections.
+fn imeta_add(
+    kind_flag: &str,
+    path: &str,
+    attr: &str,
+    value: &str,
+    units: Option<&str>,
+) {
+    let mut args: Vec<String> = vec![
+        "add".to_string(),
+        kind_flag.to_string(),
+        path.to_string(),
+        attr.to_string(),
+        value.to_string(),
+    ];
+    if let Some(u) = units {
+        args.push(u.to_string());
+    }
+    let status = Command::new("imeta")
+        .args(&args)
+        .status()
+        .expect("failed to spawn imeta");
+    assert!(status.success(), "imeta add {} {} failed", kind_flag, path);
+}
+
+/// `imeta rm <kind_flag> <path> <attr> <value> [units]`: best-effort remove
+/// of a previously-added AVU. Errors are swallowed because this runs from
+/// drop guards and the cleanup is idempotent.
+fn imeta_rm(kind_flag: &str, path: &str, attr: &str, value: &str, units: Option<&str>) {
+    let mut args: Vec<String> = vec![
+        "rm".to_string(),
+        kind_flag.to_string(),
+        path.to_string(),
+        attr.to_string(),
+        value.to_string(),
+    ];
+    if let Some(u) = units {
+        args.push(u.to_string());
+    }
+    let _ = Command::new("imeta").args(&args).status();
+}
+
+/// Drop guard for an AVU on a data object or collection.
+struct AvuCleanup {
+    kind_flag: &'static str,
+    path: String,
+    attr: String,
+    value: String,
+    units: Option<String>,
+}
+impl Drop for AvuCleanup {
+    fn drop(&mut self) {
+        imeta_rm(
+            self.kind_flag,
+            &self.path,
+            &self.attr,
+            &self.value,
+            self.units.as_deref(),
+        );
+    }
+}
+
 #[test]
 fn list_home_collection_returns_target_unchanged() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
@@ -154,6 +217,130 @@ fn list_data_object_without_flags_preserves_none_fields() {
     };
     assert_eq!(d.size, None, "size stays None when flag is off");
     assert_eq!(d.checksum, None, "checksum stays None when flag is off");
+}
+
+#[test]
+fn list_data_object_with_avus() {
+    let local = "/tmp/baton_rs_test_file_avus";
+    std::fs::write(local, b"avu test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_avus";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _file_cleanup = IrodsCleanup(remote.clone());
+
+    // Stage two AVUs: one with units, one without. Different attribute
+    // names so order-of-removal in cleanup doesn't matter.
+    imeta_add("-d", &remote, "sample", "12345", Some("id"));
+    imeta_add("-d", &remote, "lane", "7", None);
+    let _avu1 = AvuCleanup {
+        kind_flag: "-d",
+        path: remote.clone(),
+        attr: "sample".to_string(),
+        value: "12345".to_string(),
+        units: Some("id".to_string()),
+    };
+    let _avu2 = AvuCleanup {
+        kind_flag: "-d",
+        path: remote.clone(),
+        attr: "lane".to_string(),
+        value: "7".to_string(),
+        units: None,
+    };
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        avu: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let avus = d.avus.as_ref().expect("avus populated");
+    assert_eq!(avus.len(), 2, "expected exactly the two staged AVUs, got {:?}", avus);
+
+    // Order of returned AVUs is iRODS-defined; assert by content rather
+    // than position.
+    let sample = avus
+        .iter()
+        .find(|a| a.attribute == "sample")
+        .expect("sample AVU present");
+    assert_eq!(sample.value, "12345");
+    assert_eq!(sample.units.as_deref(), Some("id"));
+
+    let lane = avus
+        .iter()
+        .find(|a| a.attribute == "lane")
+        .expect("lane AVU present");
+    assert_eq!(lane.value, "7");
+    assert_eq!(lane.units, None, "unitless AVU has units = None");
+}
+
+#[test]
+fn list_collection_with_avus() {
+    // Use a fresh sub-collection so any AVUs we add can't collide with
+    // unrelated tests in /testZone/home/irods. imkdir creates and irmdir
+    // (via IrodsCleanup => irm -f works on collections too) tears it down.
+    let test_coll = "/testZone/home/irods/baton_rs_avu_coll";
+    let _coll_cleanup = IrodsCleanup(test_coll.to_string());
+
+    let mkdir_status = Command::new("imkdir")
+        .args(["-p", test_coll])
+        .status()
+        .expect("failed to spawn imkdir");
+    assert!(mkdir_status.success(), "imkdir {} failed", test_coll);
+
+    imeta_add("-C", test_coll, "project", "baton-rs", None);
+    let _avu = AvuCleanup {
+        kind_flag: "-C",
+        path: test_coll.to_string(),
+        attr: "project".to_string(),
+        value: "baton-rs".to_string(),
+        units: None,
+    };
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: test_coll.to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        avu: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let avus = c.avus.as_ref().expect("avus populated");
+    assert_eq!(avus.len(), 1, "expected one AVU on the collection, got {:?}", avus);
+    assert_eq!(avus[0].attribute, "project");
+    assert_eq!(avus[0].value, "baton-rs");
+    assert_eq!(avus[0].units, None);
 }
 
 #[test]

@@ -8,9 +8,13 @@
 //! `--checksum`. Metadata flags (`--avu`, `--acl`, `--replicate`,
 //! `--timestamp`) and `--contents` arrive in Sessions 3b / 3c respectively.
 
+use std::ffi::CString;
+use std::mem::MaybeUninit;
+
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
-use crate::types::Target;
+use crate::ffi;
+use crate::types::{Avu, Target};
 
 /// Which optional fields the caller wants populated in the output.
 #[derive(Debug, Default, Clone, Copy)]
@@ -53,7 +57,150 @@ pub fn list_one(
         }
     }
 
+    if opts.avu {
+        let avus = fetch_avus(conn, &target)?;
+        match &mut target {
+            Target::DataObject(d) => d.avus = Some(avus),
+            Target::Collection(c) => c.avus = Some(avus),
+        }
+    }
+
     Ok(target)
+}
+
+// --- catalog query helpers ----------------------------------------------------
+
+/// Default `maxRows` for our catalog queries — picks up most realistic
+/// per-object metadata sets in one round trip; pagination via `query()`
+/// handles the rest transparently.
+const QUERY_PAGE_SIZE: i32 = 500;
+
+/// Escape single quotes for inclusion in a genQuery WHERE-clause literal.
+/// Paths and metadata values can legitimately contain `'`; the iRODS query
+/// parser accepts the SQL-style `''` doubled form.
+fn sql_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Initialise a zeroed `genQueryInp_t` with the standard page size.
+/// Caller is responsible for `clearGenQueryInp` after using it.
+fn new_query_inp() -> MaybeUninit<ffi::genQueryInp_t> {
+    let mut inp = MaybeUninit::<ffi::genQueryInp_t>::zeroed();
+    // SAFETY: the zeroed struct satisfies all field-init requirements;
+    // setting maxRows is the only mutation we need before query().
+    unsafe { inp.assume_init_mut().maxRows = QUERY_PAGE_SIZE };
+    inp
+}
+
+/// Add `col` to the SELECT list of `inp` (no aggregation).
+fn add_select(inp: &mut ffi::genQueryInp_t, col: i32) {
+    unsafe { ffi::addInxIval(&mut inp.selectInp, col, 0) };
+}
+
+/// Add a WHERE condition to `inp`. `condition` is the operator + literal
+/// the way iRODS's genQuery parser wants it, e.g. `"= '/testZone/home/irods'"`.
+fn add_where(
+    inp: &mut ffi::genQueryInp_t,
+    col: i32,
+    condition: &str,
+) -> Result<(), BatonError> {
+    let c = CString::new(condition).map_err(|_| BatonError {
+        code: -1,
+        message: "WHERE condition contains interior NUL".to_string(),
+    })?;
+    // iRODS's addInxVal strdup's the value, so it's safe to drop `c` here.
+    unsafe { ffi::addInxVal(&mut inp.sqlCondInp, col, c.as_ptr()) };
+    Ok(())
+}
+
+/// Run a populated input and always clear it before returning, regardless
+/// of whether the query succeeded — `clearGenQueryInp` frees the
+/// strdup'd condition / select buffers.
+fn run_query(
+    conn: &mut RodsConnection,
+    inp: &mut ffi::genQueryInp_t,
+) -> Result<Vec<Vec<String>>, BatonError> {
+    let result = conn.query(inp);
+    unsafe { ffi::clearGenQueryInp(inp) };
+    result
+}
+
+// --- per-flag fetchers --------------------------------------------------------
+
+/// Fetch the AVUs attached to a target.
+///
+/// Data objects use the `META_DATA_*` columns and need both
+/// `COLL_NAME` and `DATA_NAME` in the WHERE clause; collections use the
+/// `META_COLL_*` columns and only need `COLL_NAME`.
+fn fetch_avus(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Avu>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    let (col_attr, col_value, col_units) = match target {
+        Target::DataObject(_) => (
+            ffi::COL_META_DATA_ATTR_NAME as i32,
+            ffi::COL_META_DATA_ATTR_VALUE as i32,
+            ffi::COL_META_DATA_ATTR_UNITS as i32,
+        ),
+        Target::Collection(_) => (
+            ffi::COL_META_COLL_ATTR_NAME as i32,
+            ffi::COL_META_COLL_ATTR_VALUE as i32,
+            ffi::COL_META_COLL_ATTR_UNITS as i32,
+        ),
+    };
+    add_select(inp_ref, col_attr);
+    add_select(inp_ref, col_value);
+    add_select(inp_ref, col_units);
+
+    match target {
+        Target::DataObject(d) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.collection)),
+            )?;
+            add_where(
+                inp_ref,
+                ffi::COL_DATA_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.data_object)),
+            )?;
+        }
+        Target::Collection(c) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&c.collection)),
+            )?;
+        }
+    }
+
+    let rows = run_query(conn, inp_ref)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            // Defensive .get/.cloned: rcGenQuery should always populate every
+            // selected column, but treating a missing column as empty string
+            // keeps the helper from panicking on an unexpectedly truncated
+            // row.
+            let attribute = row.first().cloned().unwrap_or_default();
+            let value = row.get(1).cloned().unwrap_or_default();
+            let units_raw = row.get(2).cloned().unwrap_or_default();
+            // iRODS returns an empty string for unitless AVUs; fold that
+            // back to None so the JSON output omits the `units` key
+            // (matches baton's behaviour).
+            let units = if units_raw.is_empty() {
+                None
+            } else {
+                Some(units_raw)
+            };
+            Avu {
+                attribute,
+                value,
+                units,
+            }
+        })
+        .collect())
 }
 
 /// Same as [`list_one`], but catches iRODS errors and emits the input
