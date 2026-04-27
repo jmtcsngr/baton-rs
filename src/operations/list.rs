@@ -14,7 +14,7 @@ use std::mem::MaybeUninit;
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
 use crate::ffi;
-use crate::types::{Avu, Target};
+use crate::types::{Acl, AclLevel, Avu, Target};
 
 /// Which optional fields the caller wants populated in the output.
 #[derive(Debug, Default, Clone, Copy)]
@@ -62,6 +62,14 @@ pub fn list_one(
         match &mut target {
             Target::DataObject(d) => d.avus = Some(avus),
             Target::Collection(c) => c.avus = Some(avus),
+        }
+    }
+
+    if opts.acl {
+        let acls = fetch_acl(conn, &target)?;
+        match &mut target {
+            Target::DataObject(d) => d.access = Some(acls),
+            Target::Collection(c) => c.access = Some(acls),
         }
     }
 
@@ -205,6 +213,113 @@ fn fetch_avus(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Avu>, Ba
             }
         })
         .collect())
+}
+
+/// Fetch the ACL entries attached to a target. iRODS auto-joins the user
+/// table when both `COL_USER_*` and an access-name column appear in the
+/// same query, so we can read user, zone, and access level in one row.
+fn fetch_acl(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Acl>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    let col_access_name = match target {
+        Target::DataObject(_) => ffi::COL_DATA_ACCESS_NAME as i32,
+        Target::Collection(_) => ffi::COL_COLL_ACCESS_NAME as i32,
+    };
+    add_select(inp_ref, ffi::COL_USER_NAME as i32);
+    add_select(inp_ref, ffi::COL_USER_ZONE as i32);
+    add_select(inp_ref, col_access_name);
+
+    match target {
+        Target::DataObject(d) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.collection)),
+            )?;
+            add_where(
+                inp_ref,
+                ffi::COL_DATA_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.data_object)),
+            )?;
+        }
+        Target::Collection(c) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&c.collection)),
+            )?;
+        }
+    }
+
+    let rows = run_query(conn, inp_ref)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let owner = row.first().cloned().unwrap_or_default();
+            let zone_raw = row.get(1).cloned().unwrap_or_default();
+            let level_str = row.get(2).cloned().unwrap_or_default();
+            let level = parse_acl_level(&level_str)?;
+            // baton's schema treats `zone` as optional; fold an empty
+            // server-side zone string to None so the JSON omits it.
+            let zone = if zone_raw.is_empty() {
+                None
+            } else {
+                Some(zone_raw)
+            };
+            Ok(Acl { owner, level, zone })
+        })
+        .collect()
+}
+
+/// Map iRODS's catalog access-level string into our typed enum. iRODS
+/// uses the verbose forms `read object` / `modify object`; baton (and
+/// our JSON schema) prefer the compact `read` / `write`. Both forms are
+/// accepted here so behaviour is stable across iRODS server versions
+/// that have shipped slightly different strings.
+fn parse_acl_level(s: &str) -> Result<AclLevel, BatonError> {
+    match s {
+        "null" => Ok(AclLevel::Null),
+        "read" | "read object" => Ok(AclLevel::Read),
+        "write" | "modify object" => Ok(AclLevel::Write),
+        "own" => Ok(AclLevel::Own),
+        other => Err(BatonError {
+            code: -1,
+            message: format!("unknown iRODS access level: {:?}", other),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_acl_level_accepts_compact_and_verbose_forms() {
+        assert_eq!(parse_acl_level("null").unwrap(), AclLevel::Null);
+        assert_eq!(parse_acl_level("read").unwrap(), AclLevel::Read);
+        assert_eq!(parse_acl_level("read object").unwrap(), AclLevel::Read);
+        assert_eq!(parse_acl_level("write").unwrap(), AclLevel::Write);
+        assert_eq!(parse_acl_level("modify object").unwrap(), AclLevel::Write);
+        assert_eq!(parse_acl_level("own").unwrap(), AclLevel::Own);
+    }
+
+    #[test]
+    fn parse_acl_level_errors_on_unknown_string() {
+        let err = parse_acl_level("inherit").unwrap_err();
+        assert!(
+            err.message.contains("unknown iRODS access level"),
+            "got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn sql_escape_doubles_single_quotes() {
+        assert_eq!(sql_escape("plain"), "plain");
+        assert_eq!(sql_escape("O'Brien"), "O''Brien");
+        assert_eq!(sql_escape("''"), "''''");
+    }
 }
 
 /// Same as [`list_one`], but catches iRODS errors and emits the input

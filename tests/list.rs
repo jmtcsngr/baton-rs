@@ -10,7 +10,7 @@ use std::process::Command;
 
 use baton_rs::connection::ObjType;
 use baton_rs::operations::list::{list_one, list_one_annotated, ListOptions};
-use baton_rs::types::{Collection, DataObject};
+use baton_rs::types::{AclLevel, Collection, DataObject};
 use baton_rs::{RodsConnection, Target};
 
 /// Drop-guard that removes a remote iRODS path via `irm -f` on Drop,
@@ -341,6 +341,86 @@ fn list_collection_with_avus() {
     assert_eq!(avus[0].attribute, "project");
     assert_eq!(avus[0].value, "baton-rs");
     assert_eq!(avus[0].units, None);
+}
+
+#[test]
+fn list_data_object_with_acl() {
+    let local = "/tmp/baton_rs_test_file_acl";
+    std::fs::write(local, b"acl test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_acl";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        acl: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let access = d.access.as_ref().expect("access populated");
+    assert!(!access.is_empty(), "expected at least the owner ACL");
+
+    // Newly-iput data objects always have the calling user with `own`
+    // access. We assert on that — the rest of the ACL is server-policy
+    // dependent and not worth pinning here.
+    let owner_acl = access
+        .iter()
+        .find(|a| a.owner == "irods")
+        .expect("owner ACL present");
+    assert_eq!(owner_acl.level, AclLevel::Own);
+    assert_eq!(owner_acl.zone.as_deref(), Some("testZone"));
+}
+
+#[test]
+fn list_collection_with_acl() {
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // Home collection always has at least the owner with `own` access.
+    let input = Target::Collection(Collection {
+        collection: "/testZone/home/irods".to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        acl: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let access = c.access.as_ref().expect("access populated");
+    let owner_acl = access
+        .iter()
+        .find(|a| a.owner == "irods")
+        .expect("owner ACL present");
+    assert_eq!(owner_acl.level, AclLevel::Own);
 }
 
 #[test]
