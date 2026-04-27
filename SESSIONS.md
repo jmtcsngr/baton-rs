@@ -150,21 +150,46 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 3 — baton-list
 
-**Status:** `<not started>`
+**Status:** completed on 2026-04-24
 
 **Goal:** Full `baton-list` implementation with all flags.
 
-**Completed:**
-- `<fill in>`
+**Completed (split across three branches: 3a, 3b, 3c):**
+- **Dependencies:** `clap`, `anyhow`, `tracing`, `tracing-subscriber` added to `Cargo.toml`. First time these land — they're the binary-side foundation for every subsequent operation.
+- **`src/bin/baton-list.rs`** — full CLI: clap parses every Session 3 flag, tracing initialises to stderr (`RUST_LOG` > `--verbose`/`--silent` > default INFO), main loop opens one `RodsConnection` per invocation and dispatches each input line through `list_one_annotated`.
+- **`src/operations/list.rs`** — first per-operation module. `list_one(conn, target, opts) -> Result<Target, BatonError>` for programmatic use; `list_one_annotated` wraps it for the binary's continue-on-error stream.
+- **`Target` enum** (untagged serde) — `DataObject` vs `Collection` distinguished by presence of `data_object`. `Target::path()` joins for stat input; `Target::set_error` for in-band error annotation.
+- **`Item` type alias = `Target`** — same JSON shape, used in `Collection.contents`. `Vec<Item>` and `Vec<Target>` interoperate freely.
+- **`DataObject`/`Collection` extensions** — both gained an optional `error: Option<BatonError>` field; `Collection` gained `contents: Option<Vec<Item>>`.
+- **Flags wired** — `--size`/`--checksum` from `rcObjStat`; `--avu`/`--acl`/`--replicate`/`--timestamp` via shared `rcGenQuery` helpers (`new_query_inp` / `add_select` / `add_where` / `run_query` / `sql_escape`); `--contents` via two queries merged into `Vec<Item>`. Per-replica timestamp fan-out (one `created` + one `modified` entry per replica) matches baton's emission shape.
+- **In-band error annotation** — bad inputs get `{"error": {"code": ..., "message": ...}}` and the stream continues. JSON-parse errors at the binary level stay fail-fast.
+- **FFI expansion (`build.rs`)** — adds `rcObjStat`/`freeRodsObjStat`/`rcGenQuery`/`addInxIval`/`addInxVal`/`clearGenQueryInp`/`freeGenQueryOut` plus `dataObjInp_t`/`rodsObjStat_t`/`objType_t`/`genQueryInp_t`/`genQueryOut_t`/`sqlResult_t`/`inxIvalPair_t`/`inxValPair_t` types and the full `COL_*` column-constant family. No new link libraries.
+- **`RodsConnection::stat` and `RodsConnection::query`** — new methods. `query()` is `pub(crate)` because `genQueryInp_t` itself is crate-internal.
+- **Compatibility test** — `tests/compat_baton.rs` runs both upstream `baton-list` and our binary on the same NDJSON, compares parsed JSON structurally on key fields. Skips cleanly when upstream not on PATH (current state in CI/devcontainer). Definitive equivalence still scoped to Session 8 (partisan).
+- **15+ integration tests** in `tests/list.rs` covering each flag against live iRODS — `iput -K` / `imeta add` / `ichmod` / `imkdir` for staging, `IrodsCleanup` (now `irm -r -f`) / `AvuCleanup` drop guards for teardown.
 
 **Deferred / known gaps:**
-- `<fill in>`
+- **iRODS catalog-column naming inconsistency.** 4.3.5's bindings mix long-form (`COL_DATA_REPL_NUM`, `COL_DATA_ACCESS_NAME`, `COL_DATA_USER_NAME`) and short-form (`COL_D_DATA_CHECKSUM`, `COL_D_RESC_NAME`, `COL_D_REPL_STATUS`) prefixes for related columns. Comments at the call sites prevent future "tidy-up" attempts that would re-break the build.
+- **Collection vs data-object ACL queries need different user-name columns.** `COL_USER_NAME`/`COL_USER_ZONE` join via the data-access path; collections need `COL_COLL_USER_NAME`/`COL_COLL_USER_ZONE`. Caught in CI; would have leaked silently if we'd shipped without that.
+- **`CAT_NO_ROWS_FOUND` not in bindings** despite `CAT_.*` allowlist. Hardcoded to `-808000` at the single callsite; the constant lives behind a header `wrapper.h` doesn't reach.
+- **`clearGenQueryInp` declared with `void *` parameter** — bindgen reflects that faithfully; cast through `*mut _` at the call site.
+- **`--contents` is non-recursive** — matches baton. Recursive walking would need its own design and isn't in any planned session.
+- **Compat test is best-effort** — currently a no-op in this dev image. Real cross-implementation testing arrives via partisan in Session 8.
+- **iRODS access strings vary across server versions** — `parse_acl_level` accepts both compact (`read`) and verbose (`read object`) forms; unknown values surface as errors so a future iRODS that adds new levels is loud rather than silent.
 
 **Decisions made:**
-- `<fill in>`
+- **`Item = Target` (alias, not duplicate enum)** — same on-the-wire shape; aliasing avoids parallel maintenance.
+- **`--contents` and `--replicate` ignore the wrong-target flag silently** — matches baton's behaviour. `--contents` on a data object and `--replicate` on a collection are no-ops, not errors.
+- **In-band error annotation uses the existing `BatonError` type** — no schema-level changes beyond adding the optional `error` field.
+- **NDJSON input parsing stays fail-fast** — we can only annotate inputs we managed to parse. Malformed JSON crashes the stream by design.
+- **iRODS unit-less AVUs (`""` from server) fold to `units: None`** — matches baton's JSON shape. Same treatment for empty `zone` on ACL entries.
+- **iRODS replica `valid` is derived from `COL_D_REPL_STATUS == "1"`** — anything else (mid-write, marked-stale, ...) folds to `false`.
+- **Test assertions on iRODS state pin shape, not exact values.** Replica counts, exact timestamps, and specific ACL owners vary by server policy — every test that touches those checks for the invariants that actually matter, not a specific catalog snapshot.
 
-**Open questions for next session:**
-- `<fill in>`
+**Open questions for next session (Session 4 — baton-metamod + baton-metaquery):**
+- AVU add/remove flow: which `rcMod*` API does `imeta add -d` use, and does it require any of the same iRODS auth-quirk handling we hit with `clientLogin`?
+- The `Operator` enum from Session 1 finally gets used. Does it need any per-version normalisation across iRODS 4.3.x?
+- `baton-metaquery` returns search results — likely reuses much of `operations::list::list_one`'s output formatting; consider extracting a shared "decorate this Target with flag-requested fields" helper.
 
 ---
 
@@ -294,3 +319,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-24` — Session 0 completed: CI green across iRODS 4.2.7/4.3.4/4.3.5 matrix.
 - `2026-04-24` — Session 1 completed: JSON data model and stub binaries.
 - `2026-04-24` — Session 2 completed: iRODS FFI + RodsConnection (connect, login, reconnect). 4.2.7 flipped experimental (issue #9); auth bypasses clientLogin (issue #10).
+- `2026-04-24` — Session 3 completed across three branches: 3a (CLI harness + size/checksum + in-band errors), 3b (avu/acl/replicate/timestamp via rcGenQuery), 3c (contents + best-effort compat test). First real binary on the FFI substrate.

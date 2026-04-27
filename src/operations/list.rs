@@ -14,7 +14,7 @@ use std::mem::MaybeUninit;
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
 use crate::ffi;
-use crate::types::{Acl, AclLevel, Avu, DataObject, Replicate, Target, Timestamp};
+use crate::types::{Acl, AclLevel, Avu, Collection, DataObject, Item, Replicate, Target, Timestamp};
 
 /// Which optional fields the caller wants populated in the output.
 #[derive(Debug, Default, Clone, Copy)]
@@ -86,6 +86,17 @@ pub fn list_one(
         match &mut target {
             Target::DataObject(d) => d.timestamps = Some(timestamps),
             Target::Collection(c) => c.timestamps = Some(timestamps),
+        }
+    }
+
+    // Contents apply only to collections; baton silently ignores --contents
+    // on data-object inputs and we follow suit.
+    if opts.contents {
+        if let Target::Collection(c) = &target {
+            let contents = fetch_contents(conn, &c.collection)?;
+            if let Target::Collection(c) = &mut target {
+                c.contents = Some(contents);
+            }
         }
     }
 
@@ -436,6 +447,73 @@ fn fetch_timestamps(
         });
     }
     Ok(timestamps)
+}
+
+/// List the direct children of a collection: sub-collections + data
+/// objects, merged into one `Vec<Item>`.
+///
+/// iRODS doesn't expose both in a single `genQuery`, so we run two
+/// queries — one filtering on `COL_COLL_PARENT_NAME` for the immediate
+/// child collections, one filtering on `COL_COLL_NAME` for the data
+/// objects directly under this collection. The result preserves
+/// catalog order (sub-collections first, then data objects); baton's
+/// own behaviour is also unsorted.
+///
+/// Each returned `Item` carries only path identity — no AVUs, ACLs,
+/// timestamps, replicates, or recursive contents. Callers wanting
+/// deeper detail can re-run `baton-list` with the appropriate flags
+/// against each child.
+fn fetch_contents(conn: &mut RodsConnection, parent: &str) -> Result<Vec<Item>, BatonError> {
+    let mut items = Vec::new();
+
+    // 1. Sub-collections directly under `parent`.
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+    add_select(inp_ref, ffi::COL_COLL_NAME as i32);
+    add_where(
+        inp_ref,
+        ffi::COL_COLL_PARENT_NAME as i32,
+        &format!("= '{}'", sql_escape(parent)),
+    )?;
+    let sub_rows = run_query(conn, inp_ref)?;
+    for row in sub_rows {
+        let path = row.into_iter().next().unwrap_or_default();
+        items.push(Target::Collection(Collection {
+            collection: path,
+            avus: None,
+            access: None,
+            timestamps: None,
+            contents: None,
+            error: None,
+        }));
+    }
+
+    // 2. Data objects directly under `parent`.
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+    add_select(inp_ref, ffi::COL_DATA_NAME as i32);
+    add_where(
+        inp_ref,
+        ffi::COL_COLL_NAME as i32,
+        &format!("= '{}'", sql_escape(parent)),
+    )?;
+    let data_rows = run_query(conn, inp_ref)?;
+    for row in data_rows {
+        let name = row.into_iter().next().unwrap_or_default();
+        items.push(Target::DataObject(DataObject {
+            collection: parent.to_string(),
+            data_object: name,
+            size: None,
+            checksum: None,
+            avus: None,
+            access: None,
+            replicates: None,
+            timestamps: None,
+            error: None,
+        }));
+    }
+
+    Ok(items)
 }
 
 fn parse_acl_level(s: &str) -> Result<AclLevel, BatonError> {
