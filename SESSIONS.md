@@ -150,7 +150,7 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 3 — baton-list
 
-**Status:** completed on 2026-04-24
+**Status:** completed on 2026-04-27
 
 **Goal:** Full `baton-list` implementation with all flags.
 
@@ -319,4 +319,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-24` — Session 0 completed: CI green across iRODS 4.2.7/4.3.4/4.3.5 matrix.
 - `2026-04-24` — Session 1 completed: JSON data model and stub binaries.
 - `2026-04-24` — Session 2 completed: iRODS FFI + RodsConnection (connect, login, reconnect). 4.2.7 flipped experimental (issue #9); auth bypasses clientLogin (issue #10).
-- `2026-04-24` — Session 3 completed across three branches: 3a (CLI harness + size/checksum + in-band errors), 3b (avu/acl/replicate/timestamp via rcGenQuery), 3c (contents + best-effort compat test). First real binary on the FFI substrate.
+- `2026-04-27` — Session 3 completed across three branches: 3a (CLI harness + size/checksum + in-band errors), 3b (avu/acl/replicate/timestamp via rcGenQuery), 3c (contents + best-effort compat test). First real binary on the FFI substrate.
