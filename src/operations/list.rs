@@ -8,9 +8,13 @@
 //! `--checksum`. Metadata flags (`--avu`, `--acl`, `--replicate`,
 //! `--timestamp`) and `--contents` arrive in Sessions 3b / 3c respectively.
 
+use std::ffi::CString;
+use std::mem::MaybeUninit;
+
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
-use crate::types::Target;
+use crate::ffi;
+use crate::types::{Acl, AclLevel, Avu, DataObject, Replicate, Target, Timestamp};
 
 /// Which optional fields the caller wants populated in the output.
 #[derive(Debug, Default, Clone, Copy)]
@@ -53,7 +57,430 @@ pub fn list_one(
         }
     }
 
+    if opts.avu {
+        let avus = fetch_avus(conn, &target)?;
+        match &mut target {
+            Target::DataObject(d) => d.avus = Some(avus),
+            Target::Collection(c) => c.avus = Some(avus),
+        }
+    }
+
+    if opts.acl {
+        let acls = fetch_acl(conn, &target)?;
+        match &mut target {
+            Target::DataObject(d) => d.access = Some(acls),
+            Target::Collection(c) => c.access = Some(acls),
+        }
+    }
+
+    // Replicates are a data-object concept; baton silently ignores
+    // --replicate on collections, and we follow suit.
+    if opts.replicate {
+        if let Target::DataObject(d) = &mut target {
+            d.replicates = Some(fetch_replicates(conn, d)?);
+        }
+    }
+
+    if opts.timestamp {
+        let timestamps = fetch_timestamps(conn, &target)?;
+        match &mut target {
+            Target::DataObject(d) => d.timestamps = Some(timestamps),
+            Target::Collection(c) => c.timestamps = Some(timestamps),
+        }
+    }
+
     Ok(target)
+}
+
+// --- catalog query helpers ----------------------------------------------------
+
+/// Default `maxRows` for our catalog queries — picks up most realistic
+/// per-object metadata sets in one round trip; pagination via `query()`
+/// handles the rest transparently.
+const QUERY_PAGE_SIZE: i32 = 500;
+
+/// Escape single quotes for inclusion in a genQuery WHERE-clause literal.
+/// Paths and metadata values can legitimately contain `'`; the iRODS query
+/// parser accepts the SQL-style `''` doubled form.
+fn sql_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Initialise a zeroed `genQueryInp_t` with the standard page size.
+/// Caller is responsible for `clearGenQueryInp` after using it.
+fn new_query_inp() -> MaybeUninit<ffi::genQueryInp_t> {
+    let mut inp = MaybeUninit::<ffi::genQueryInp_t>::zeroed();
+    // SAFETY: the zeroed struct satisfies all field-init requirements;
+    // setting maxRows is the only mutation we need before query().
+    unsafe { inp.assume_init_mut().maxRows = QUERY_PAGE_SIZE };
+    inp
+}
+
+/// Add `col` to the SELECT list of `inp` (no aggregation).
+fn add_select(inp: &mut ffi::genQueryInp_t, col: i32) {
+    unsafe { ffi::addInxIval(&mut inp.selectInp, col, 0) };
+}
+
+/// Add a WHERE condition to `inp`. `condition` is the operator + literal
+/// the way iRODS's genQuery parser wants it, e.g. `"= '/testZone/home/irods'"`.
+fn add_where(
+    inp: &mut ffi::genQueryInp_t,
+    col: i32,
+    condition: &str,
+) -> Result<(), BatonError> {
+    let c = CString::new(condition).map_err(|_| BatonError {
+        code: -1,
+        message: "WHERE condition contains interior NUL".to_string(),
+    })?;
+    // iRODS's addInxVal strdup's the value, so it's safe to drop `c` here.
+    unsafe { ffi::addInxVal(&mut inp.sqlCondInp, col, c.as_ptr()) };
+    Ok(())
+}
+
+/// Run a populated input and always clear it before returning, regardless
+/// of whether the query succeeded — `clearGenQueryInp` frees the
+/// strdup'd condition / select buffers.
+///
+/// iRODS declares `clearGenQueryInp` with a generic `void *` parameter
+/// (it shares the signature with other `clearXxx` helpers). bindgen
+/// reflects that faithfully; we cast through `*mut _` here.
+fn run_query(
+    conn: &mut RodsConnection,
+    inp: &mut ffi::genQueryInp_t,
+) -> Result<Vec<Vec<String>>, BatonError> {
+    let result = conn.query(inp);
+    unsafe { ffi::clearGenQueryInp(inp as *mut _ as *mut std::os::raw::c_void) };
+    result
+}
+
+// --- per-flag fetchers --------------------------------------------------------
+
+/// Fetch the AVUs attached to a target.
+///
+/// Data objects use the `META_DATA_*` columns and need both
+/// `COLL_NAME` and `DATA_NAME` in the WHERE clause; collections use the
+/// `META_COLL_*` columns and only need `COLL_NAME`.
+fn fetch_avus(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Avu>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    let (col_attr, col_value, col_units) = match target {
+        Target::DataObject(_) => (
+            ffi::COL_META_DATA_ATTR_NAME as i32,
+            ffi::COL_META_DATA_ATTR_VALUE as i32,
+            ffi::COL_META_DATA_ATTR_UNITS as i32,
+        ),
+        Target::Collection(_) => (
+            ffi::COL_META_COLL_ATTR_NAME as i32,
+            ffi::COL_META_COLL_ATTR_VALUE as i32,
+            ffi::COL_META_COLL_ATTR_UNITS as i32,
+        ),
+    };
+    add_select(inp_ref, col_attr);
+    add_select(inp_ref, col_value);
+    add_select(inp_ref, col_units);
+
+    match target {
+        Target::DataObject(d) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.collection)),
+            )?;
+            add_where(
+                inp_ref,
+                ffi::COL_DATA_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.data_object)),
+            )?;
+        }
+        Target::Collection(c) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&c.collection)),
+            )?;
+        }
+    }
+
+    let rows = run_query(conn, inp_ref)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            // Defensive .get/.cloned: rcGenQuery should always populate every
+            // selected column, but treating a missing column as empty string
+            // keeps the helper from panicking on an unexpectedly truncated
+            // row.
+            let attribute = row.first().cloned().unwrap_or_default();
+            let value = row.get(1).cloned().unwrap_or_default();
+            let units_raw = row.get(2).cloned().unwrap_or_default();
+            // iRODS returns an empty string for unitless AVUs; fold that
+            // back to None so the JSON output omits the `units` key
+            // (matches baton's behaviour).
+            let units = if units_raw.is_empty() {
+                None
+            } else {
+                Some(units_raw)
+            };
+            Avu {
+                attribute,
+                value,
+                units,
+            }
+        })
+        .collect())
+}
+
+/// Fetch the ACL entries attached to a target.
+///
+/// Collection ACLs need the *collection-specific* user-name and zone
+/// columns (`COL_COLL_USER_NAME` / `COL_COLL_USER_ZONE`) — the generic
+/// `COL_USER_NAME` / `COL_USER_ZONE` columns join via the data-access
+/// path, so on a collection input they yield zero rows. baton's own
+/// source uses the same split.
+fn fetch_acl(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Acl>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    let (col_user_name, col_user_zone, col_access_name) = match target {
+        Target::DataObject(_) => (
+            ffi::COL_USER_NAME as i32,
+            ffi::COL_USER_ZONE as i32,
+            ffi::COL_DATA_ACCESS_NAME as i32,
+        ),
+        Target::Collection(_) => (
+            ffi::COL_COLL_USER_NAME as i32,
+            ffi::COL_COLL_USER_ZONE as i32,
+            ffi::COL_COLL_ACCESS_NAME as i32,
+        ),
+    };
+    add_select(inp_ref, col_user_name);
+    add_select(inp_ref, col_user_zone);
+    add_select(inp_ref, col_access_name);
+
+    match target {
+        Target::DataObject(d) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.collection)),
+            )?;
+            add_where(
+                inp_ref,
+                ffi::COL_DATA_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.data_object)),
+            )?;
+        }
+        Target::Collection(c) => {
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&c.collection)),
+            )?;
+        }
+    }
+
+    let rows = run_query(conn, inp_ref)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let owner = row.first().cloned().unwrap_or_default();
+            let zone_raw = row.get(1).cloned().unwrap_or_default();
+            let level_str = row.get(2).cloned().unwrap_or_default();
+            let level = parse_acl_level(&level_str)?;
+            // baton's schema treats `zone` as optional; fold an empty
+            // server-side zone string to None so the JSON omits it.
+            let zone = if zone_raw.is_empty() {
+                None
+            } else {
+                Some(zone_raw)
+            };
+            Ok(Acl { owner, level, zone })
+        })
+        .collect()
+}
+
+/// Map iRODS's catalog access-level string into our typed enum. iRODS
+/// uses the verbose forms `read object` / `modify object`; baton (and
+/// our JSON schema) prefer the compact `read` / `write`. Both forms are
+/// accepted here so behaviour is stable across iRODS server versions
+/// that have shipped slightly different strings.
+/// Fetch the replicas of a data object. Each row from the catalog becomes
+/// one [`Replicate`].
+///
+/// `valid` is derived from `COL_D_REPL_STATUS`: iRODS uses `1` for a good
+/// replica and `0` (or `4` mid-write, etc.) for not-good. We collapse
+/// anything other than literal `"1"` to `false` — matches baton's
+/// behaviour and keeps callers from having to know iRODS's status codes.
+fn fetch_replicates(
+    conn: &mut RodsConnection,
+    d: &DataObject,
+) -> Result<Vec<Replicate>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    // Naming inconsistency note: iRODS 4.3.5's bindings expose this set
+    // as a mix of long-form (COL_DATA_REPL_NUM) and short-form
+    // (COL_D_DATA_CHECKSUM / COL_D_RESC_NAME / COL_D_REPL_STATUS) — not a
+    // typo, that's actually how the headers are. Compiler "similar name"
+    // hints were the source of truth.
+    add_select(inp_ref, ffi::COL_DATA_REPL_NUM as i32);
+    add_select(inp_ref, ffi::COL_D_DATA_CHECKSUM as i32);
+    add_select(inp_ref, ffi::COL_R_LOC as i32);
+    add_select(inp_ref, ffi::COL_D_RESC_NAME as i32);
+    add_select(inp_ref, ffi::COL_D_REPL_STATUS as i32);
+
+    add_where(
+        inp_ref,
+        ffi::COL_COLL_NAME as i32,
+        &format!("= '{}'", sql_escape(&d.collection)),
+    )?;
+    add_where(
+        inp_ref,
+        ffi::COL_DATA_NAME as i32,
+        &format!("= '{}'", sql_escape(&d.data_object)),
+    )?;
+
+    let rows = run_query(conn, inp_ref)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let number_str = row.first().cloned().unwrap_or_default();
+            let checksum = row.get(1).cloned().unwrap_or_default();
+            let location = row.get(2).cloned().unwrap_or_default();
+            let resource = row.get(3).cloned().unwrap_or_default();
+            let status = row.get(4).cloned().unwrap_or_default();
+
+            let number: u32 = number_str.parse().map_err(|_| BatonError {
+                code: -1,
+                message: format!("non-numeric replica number: {:?}", number_str),
+            })?;
+
+            Ok(Replicate {
+                checksum,
+                location,
+                resource,
+                number,
+                valid: status == "1",
+            })
+        })
+        .collect()
+}
+
+/// Fetch the create/modify timestamps for a target.
+///
+/// Each catalog row carries both timestamps for the same scope (per-replica
+/// for a data object, single per-collection). We fan out to two
+/// [`Timestamp`] entries per row — one with `created`, one with `modified`
+/// — so the JSON output matches baton's per-event shape.
+fn fetch_timestamps(
+    conn: &mut RodsConnection,
+    target: &Target,
+) -> Result<Vec<Timestamp>, BatonError> {
+    let mut inp = new_query_inp();
+    let inp_ref = unsafe { inp.assume_init_mut() };
+
+    let with_replicate = matches!(target, Target::DataObject(_));
+
+    match target {
+        Target::DataObject(d) => {
+            // Data object: per-replica timestamps. SELECT order matches the
+            // row indices we read out below.
+            add_select(inp_ref, ffi::COL_D_CREATE_TIME as i32);
+            add_select(inp_ref, ffi::COL_D_MODIFY_TIME as i32);
+            add_select(inp_ref, ffi::COL_DATA_REPL_NUM as i32);
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.collection)),
+            )?;
+            add_where(
+                inp_ref,
+                ffi::COL_DATA_NAME as i32,
+                &format!("= '{}'", sql_escape(&d.data_object)),
+            )?;
+        }
+        Target::Collection(c) => {
+            add_select(inp_ref, ffi::COL_COLL_CREATE_TIME as i32);
+            add_select(inp_ref, ffi::COL_COLL_MODIFY_TIME as i32);
+            add_where(
+                inp_ref,
+                ffi::COL_COLL_NAME as i32,
+                &format!("= '{}'", sql_escape(&c.collection)),
+            )?;
+        }
+    }
+
+    let rows = run_query(conn, inp_ref)?;
+
+    let mut timestamps = Vec::with_capacity(rows.len() * 2);
+    for row in rows {
+        let created = row.first().cloned().unwrap_or_default();
+        let modified = row.get(1).cloned().unwrap_or_default();
+        let replicate = if with_replicate {
+            row.get(2)
+                .and_then(|s| s.parse::<u32>().ok())
+        } else {
+            None
+        };
+
+        timestamps.push(Timestamp {
+            created: Some(created),
+            modified: None,
+            replicate,
+        });
+        timestamps.push(Timestamp {
+            created: None,
+            modified: Some(modified),
+            replicate,
+        });
+    }
+    Ok(timestamps)
+}
+
+fn parse_acl_level(s: &str) -> Result<AclLevel, BatonError> {
+    match s {
+        "null" => Ok(AclLevel::Null),
+        "read" | "read object" => Ok(AclLevel::Read),
+        "write" | "modify object" => Ok(AclLevel::Write),
+        "own" => Ok(AclLevel::Own),
+        other => Err(BatonError {
+            code: -1,
+            message: format!("unknown iRODS access level: {:?}", other),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_acl_level_accepts_compact_and_verbose_forms() {
+        assert_eq!(parse_acl_level("null").unwrap(), AclLevel::Null);
+        assert_eq!(parse_acl_level("read").unwrap(), AclLevel::Read);
+        assert_eq!(parse_acl_level("read object").unwrap(), AclLevel::Read);
+        assert_eq!(parse_acl_level("write").unwrap(), AclLevel::Write);
+        assert_eq!(parse_acl_level("modify object").unwrap(), AclLevel::Write);
+        assert_eq!(parse_acl_level("own").unwrap(), AclLevel::Own);
+    }
+
+    #[test]
+    fn parse_acl_level_errors_on_unknown_string() {
+        let err = parse_acl_level("inherit").unwrap_err();
+        assert!(
+            err.message.contains("unknown iRODS access level"),
+            "got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn sql_escape_doubles_single_quotes() {
+        assert_eq!(sql_escape("plain"), "plain");
+        assert_eq!(sql_escape("O'Brien"), "O''Brien");
+        assert_eq!(sql_escape("''"), "''''");
+    }
 }
 
 /// Same as [`list_one`], but catches iRODS errors and emits the input

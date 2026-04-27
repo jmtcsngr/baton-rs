@@ -43,6 +43,13 @@ fn main() {
         // to read size / checksum without a full catalog query.
         .allowlist_function("rcObjStat")
         .allowlist_function("freeRodsObjStat")
+        // General catalog query — every metadata flag (--avu / --acl /
+        // --replicate / --timestamp) goes through rcGenQuery.
+        .allowlist_function("rcGenQuery")
+        .allowlist_function("addInxIval")
+        .allowlist_function("addInxVal")
+        .allowlist_function("clearGenQueryInp")
+        .allowlist_function("freeGenQueryOut")
         // Types referenced by those functions.
         .allowlist_type("rcComm_t")
         .allowlist_type("rodsEnv")
@@ -50,12 +57,19 @@ fn main() {
         .allowlist_type("dataObjInp_t")
         .allowlist_type("rodsObjStat_t")
         .allowlist_type("objType_t")
+        .allowlist_type("genQueryInp_t")
+        .allowlist_type("genQueryOut_t")
+        .allowlist_type("sqlResult_t")
+        .allowlist_type("inxIvalPair_t")
+        .allowlist_type("inxValPair_t")
         // Error code constants used when translating iRODS codes into
         // BatonError. The allowlist is broad on purpose — constants are cheap.
         .allowlist_var("CAT_.*")
         .allowlist_var("SYS_.*")
         .allowlist_var("AUTH_.*")
         .allowlist_var("USER_.*")
+        // Catalog column numeric indices used in SELECT / WHERE.
+        .allowlist_var("COL_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("bindgen: failed to generate iRODS bindings");

@@ -10,7 +10,7 @@ use std::process::Command;
 
 use baton_rs::connection::ObjType;
 use baton_rs::operations::list::{list_one, list_one_annotated, ListOptions};
-use baton_rs::types::{Collection, DataObject};
+use baton_rs::types::{AclLevel, Collection, DataObject};
 use baton_rs::{RodsConnection, Target};
 
 /// Drop-guard that removes a remote iRODS path via `irm -f` on Drop,
@@ -30,6 +30,69 @@ fn iput_with_checksum(local: &str, remote: &str) {
         .status()
         .expect("failed to spawn iput");
     assert!(status.success(), "iput -K {} {} failed", local, remote);
+}
+
+/// `imeta add <kind_flag> <path> <attr> <value> [units]`: attach an AVU.
+/// `kind_flag` is `-d` for data objects, `-C` for collections.
+fn imeta_add(
+    kind_flag: &str,
+    path: &str,
+    attr: &str,
+    value: &str,
+    units: Option<&str>,
+) {
+    let mut args: Vec<String> = vec![
+        "add".to_string(),
+        kind_flag.to_string(),
+        path.to_string(),
+        attr.to_string(),
+        value.to_string(),
+    ];
+    if let Some(u) = units {
+        args.push(u.to_string());
+    }
+    let status = Command::new("imeta")
+        .args(&args)
+        .status()
+        .expect("failed to spawn imeta");
+    assert!(status.success(), "imeta add {} {} failed", kind_flag, path);
+}
+
+/// `imeta rm <kind_flag> <path> <attr> <value> [units]`: best-effort remove
+/// of a previously-added AVU. Errors are swallowed because this runs from
+/// drop guards and the cleanup is idempotent.
+fn imeta_rm(kind_flag: &str, path: &str, attr: &str, value: &str, units: Option<&str>) {
+    let mut args: Vec<String> = vec![
+        "rm".to_string(),
+        kind_flag.to_string(),
+        path.to_string(),
+        attr.to_string(),
+        value.to_string(),
+    ];
+    if let Some(u) = units {
+        args.push(u.to_string());
+    }
+    let _ = Command::new("imeta").args(&args).status();
+}
+
+/// Drop guard for an AVU on a data object or collection.
+struct AvuCleanup {
+    kind_flag: &'static str,
+    path: String,
+    attr: String,
+    value: String,
+    units: Option<String>,
+}
+impl Drop for AvuCleanup {
+    fn drop(&mut self) {
+        imeta_rm(
+            self.kind_flag,
+            &self.path,
+            &self.attr,
+            &self.value,
+            self.units.as_deref(),
+        );
+    }
 }
 
 #[test]
@@ -154,6 +217,401 @@ fn list_data_object_without_flags_preserves_none_fields() {
     };
     assert_eq!(d.size, None, "size stays None when flag is off");
     assert_eq!(d.checksum, None, "checksum stays None when flag is off");
+}
+
+#[test]
+fn list_data_object_with_avus() {
+    let local = "/tmp/baton_rs_test_file_avus";
+    std::fs::write(local, b"avu test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_avus";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _file_cleanup = IrodsCleanup(remote.clone());
+
+    // Stage two AVUs: one with units, one without. Different attribute
+    // names so order-of-removal in cleanup doesn't matter.
+    imeta_add("-d", &remote, "sample", "12345", Some("id"));
+    imeta_add("-d", &remote, "lane", "7", None);
+    let _avu1 = AvuCleanup {
+        kind_flag: "-d",
+        path: remote.clone(),
+        attr: "sample".to_string(),
+        value: "12345".to_string(),
+        units: Some("id".to_string()),
+    };
+    let _avu2 = AvuCleanup {
+        kind_flag: "-d",
+        path: remote.clone(),
+        attr: "lane".to_string(),
+        value: "7".to_string(),
+        units: None,
+    };
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        avu: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let avus = d.avus.as_ref().expect("avus populated");
+    assert_eq!(avus.len(), 2, "expected exactly the two staged AVUs, got {:?}", avus);
+
+    // Order of returned AVUs is iRODS-defined; assert by content rather
+    // than position.
+    let sample = avus
+        .iter()
+        .find(|a| a.attribute == "sample")
+        .expect("sample AVU present");
+    assert_eq!(sample.value, "12345");
+    assert_eq!(sample.units.as_deref(), Some("id"));
+
+    let lane = avus
+        .iter()
+        .find(|a| a.attribute == "lane")
+        .expect("lane AVU present");
+    assert_eq!(lane.value, "7");
+    assert_eq!(lane.units, None, "unitless AVU has units = None");
+}
+
+#[test]
+fn list_collection_with_avus() {
+    // Use a fresh sub-collection so any AVUs we add can't collide with
+    // unrelated tests in /testZone/home/irods. imkdir creates and irmdir
+    // (via IrodsCleanup => irm -f works on collections too) tears it down.
+    let test_coll = "/testZone/home/irods/baton_rs_avu_coll";
+    let _coll_cleanup = IrodsCleanup(test_coll.to_string());
+
+    let mkdir_status = Command::new("imkdir")
+        .args(["-p", test_coll])
+        .status()
+        .expect("failed to spawn imkdir");
+    assert!(mkdir_status.success(), "imkdir {} failed", test_coll);
+
+    imeta_add("-C", test_coll, "project", "baton-rs", None);
+    let _avu = AvuCleanup {
+        kind_flag: "-C",
+        path: test_coll.to_string(),
+        attr: "project".to_string(),
+        value: "baton-rs".to_string(),
+        units: None,
+    };
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: test_coll.to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        avu: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let avus = c.avus.as_ref().expect("avus populated");
+    assert_eq!(avus.len(), 1, "expected one AVU on the collection, got {:?}", avus);
+    assert_eq!(avus[0].attribute, "project");
+    assert_eq!(avus[0].value, "baton-rs");
+    assert_eq!(avus[0].units, None);
+}
+
+#[test]
+fn list_data_object_with_acl() {
+    let local = "/tmp/baton_rs_test_file_acl";
+    std::fs::write(local, b"acl test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_acl";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        acl: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let access = d.access.as_ref().expect("access populated");
+    assert!(!access.is_empty(), "expected at least the owner ACL");
+
+    // Newly-iput data objects always have the calling user with `own`
+    // access. We assert on that — the rest of the ACL is server-policy
+    // dependent and not worth pinning here.
+    let owner_acl = access
+        .iter()
+        .find(|a| a.owner == "irods")
+        .expect("owner ACL present");
+    assert_eq!(owner_acl.level, AclLevel::Own);
+    assert_eq!(owner_acl.zone.as_deref(), Some("testZone"));
+}
+
+#[test]
+fn list_collection_with_acl() {
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: "/testZone/home/irods".to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        acl: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let access = c.access.as_ref().expect("access populated");
+
+    // Whichever server-policy combination of (user, rodsadmin group, ...)
+    // owns the home collection, there must be at least one Own-level
+    // entry. The devcontainer image lists the `irods` user directly; the
+    // CI image lists only `rodsadmin` (with the user inheriting access
+    // through group membership). Don't pin a specific owner — assert the
+    // shape that actually matters for the catalog-query plumbing.
+    assert!(!access.is_empty(), "expected ACL entries on home collection");
+    assert!(
+        access.iter().any(|a| a.level == AclLevel::Own),
+        "expected at least one Own-level entry, got {:?}",
+        access
+    );
+}
+
+#[test]
+fn list_data_object_with_replicate() {
+    let local = "/tmp/baton_rs_test_file_repl";
+    std::fs::write(local, b"replicate test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_repl";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        replicate: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let replicates = d.replicates.as_ref().expect("replicates populated");
+    assert!(!replicates.is_empty(), "expected at least one replica");
+
+    // Find replica 0 — every iput'd object has at least this one. We
+    // don't pin specific resource / location values because they vary
+    // by server policy (replResc on this image, but other resources are
+    // possible elsewhere).
+    let r0 = replicates
+        .iter()
+        .find(|r| r.number == 0)
+        .expect("replica 0 present");
+    assert!(!r0.resource.is_empty(), "resource set");
+    assert!(!r0.location.is_empty(), "location set");
+    assert!(r0.valid, "replica 0 should be valid right after iput");
+}
+
+#[test]
+fn list_collection_replicate_flag_is_silently_ignored() {
+    // baton's --replicate is a no-op on collections; we mirror that.
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: "/testZone/home/irods".to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        replicate: true,
+        ..Default::default()
+    };
+    // No panic, no error, nothing populated on the collection side.
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    match result {
+        Target::Collection(_) => {} // collections have no replicates field
+        _ => panic!("expected Collection"),
+    }
+}
+
+#[test]
+fn list_data_object_with_timestamp() {
+    let local = "/tmp/baton_rs_test_file_ts";
+    std::fs::write(local, b"timestamp test").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_test_file_ts";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput_with_checksum(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        timestamp: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let d = match result {
+        Target::DataObject(d) => d,
+        _ => panic!("expected DataObject"),
+    };
+    let timestamps = d.timestamps.as_ref().expect("timestamps populated");
+
+    // Each replica produces one `created` entry + one `modified` entry.
+    // The wtsi-npg dev image's default `replResc` keeps two replicas so
+    // we typically get four total, but other servers policy may differ —
+    // assert pair-shape rather than an exact count.
+    assert!(!timestamps.is_empty(), "at least one timestamp pair");
+    assert_eq!(
+        timestamps.len() % 2,
+        0,
+        "expected paired (created + modified) entries per replica, got {:?}",
+        timestamps
+    );
+
+    // Replica 0 always exists. Verify shape there: each Timestamp has
+    // exactly one of created/modified populated, value is non-empty,
+    // replicate number tags both.
+    let r0_created = timestamps
+        .iter()
+        .find(|t| t.replicate == Some(0) && t.created.is_some())
+        .expect("replica 0 created entry present");
+    assert_eq!(r0_created.modified, None);
+    assert!(
+        !r0_created.created.as_ref().unwrap().is_empty(),
+        "created timestamp non-empty"
+    );
+
+    let r0_modified = timestamps
+        .iter()
+        .find(|t| t.replicate == Some(0) && t.modified.is_some())
+        .expect("replica 0 modified entry present");
+    assert_eq!(r0_modified.created, None);
+    assert!(
+        !r0_modified.modified.as_ref().unwrap().is_empty(),
+        "modified timestamp non-empty"
+    );
+}
+
+#[test]
+fn list_collection_with_timestamp() {
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::Collection(Collection {
+        collection: "/testZone/home/irods".to_string(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = ListOptions {
+        timestamp: true,
+        ..Default::default()
+    };
+    let result = list_one(&mut conn, input, &opts).expect("list_one");
+    let c = match result {
+        Target::Collection(c) => c,
+        _ => panic!("expected Collection"),
+    };
+    let timestamps = c.timestamps.as_ref().expect("timestamps populated");
+    assert_eq!(timestamps.len(), 2, "got {:?}", timestamps);
+
+    // Collections have no per-replica timestamps; the replicate field
+    // should be None on both entries.
+    for t in timestamps {
+        assert_eq!(t.replicate, None);
+    }
+    assert!(timestamps.iter().any(|t| t.created.is_some()));
+    assert!(timestamps.iter().any(|t| t.modified.is_some()));
 }
 
 #[test]

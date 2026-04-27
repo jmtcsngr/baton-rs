@@ -161,6 +161,81 @@ impl RodsConnection {
         Ok(result)
     }
 
+    /// Execute a prepared `genQueryInp_t` and return every matching row as
+    /// a flat `Vec<Vec<String>>`. Pagination via `continueInx` is handled
+    /// internally — callers see one combined result.
+    ///
+    /// The caller is responsible for populating the SELECT / WHERE pairs
+    /// (via `addInxIval` / `addInxVal`) and for calling
+    /// `clearGenQueryInp` on the input after this method returns.
+    /// `CAT_NO_ROWS_FOUND` is treated as a normal empty result, not an
+    /// error — any other negative status becomes a `BatonError`.
+    ///
+    /// `pub(crate)` because the `genQueryInp_t` type is crate-internal; we
+    /// don't want to leak raw iRODS structs through the public API. The
+    /// per-flag helpers in `crate::operations` build the input locally and
+    /// expose typed wrappers.
+    pub(crate) fn query(
+        &mut self,
+        inp: &mut ffi::genQueryInp_t,
+    ) -> Result<Vec<Vec<String>>, BatonError> {
+        let mut rows: Vec<Vec<String>> = Vec::new();
+
+        loop {
+            let mut out: *mut ffi::genQueryOut_t = std::ptr::null_mut();
+            let status = unsafe { ffi::rcGenQuery(self.conn, inp, &mut out) };
+
+            // A successful query that matched no rows returns
+            // CAT_NO_ROWS_FOUND (-808000). Report as empty, not an error.
+            //
+            // bindgen doesn't surface the constant from rodsClient.h's
+            // transitive includes — the symbol must live behind a header
+            // that wrapper.h doesn't reach. Hardcode the well-known value
+            // rather than expanding wrapper.h for one constant.
+            const CAT_NO_ROWS_FOUND: i32 = -808000;
+            if status == CAT_NO_ROWS_FOUND {
+                return Ok(rows);
+            }
+            if status < 0 {
+                return Err(BatonError::from_irods(status));
+            }
+            if out.is_null() {
+                return Err(BatonError {
+                    code: -1,
+                    message: "rcGenQuery returned null with non-negative status".to_string(),
+                });
+            }
+
+            // Read out all rows in this page. sqlResult[c].value is a flat
+            // buffer — row `r`'s value for column `c` lives at offset
+            // `r * sqlResult[c].len`, NUL-terminated within that slot.
+            let out_ref = unsafe { &*out };
+            for row_idx in 0..out_ref.rowCnt {
+                let mut row = Vec::with_capacity(out_ref.attriCnt as usize);
+                for col_idx in 0..out_ref.attriCnt {
+                    let sql = &out_ref.sqlResult[col_idx as usize];
+                    let offset = (row_idx * sql.len) as isize;
+                    let value_ptr = unsafe { sql.value.offset(offset) };
+                    let s = unsafe { CStr::from_ptr(value_ptr as *const _) }
+                        .to_string_lossy()
+                        .into_owned();
+                    row.push(s);
+                }
+                rows.push(row);
+            }
+
+            let continue_inx = out_ref.continueInx;
+            unsafe { ffi::freeGenQueryOut(&mut out) };
+
+            if continue_inx <= 0 {
+                break;
+            }
+            inp.continueInx = continue_inx;
+        }
+
+        Ok(rows)
+    }
+
     /// Tear down the current connection and build a fresh one in its
     /// place, re-authenticating via [`Self::login_from_auth_file`].
     ///
