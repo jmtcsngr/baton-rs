@@ -536,32 +536,39 @@ fn list_data_object_with_timestamp() {
         _ => panic!("expected DataObject"),
     };
     let timestamps = d.timestamps.as_ref().expect("timestamps populated");
-    // One replica → one created entry + one modified entry.
-    assert_eq!(timestamps.len(), 2, "got {:?}", timestamps);
 
-    // We don't assert exact values (iRODS returns padded epoch strings,
-    // and the actual time depends on when the test runs); we assert
-    // shape: each entry has exactly one of created/modified populated,
-    // and the replicate number is 0 for both.
-    let created = timestamps
+    // Each replica produces one `created` entry + one `modified` entry.
+    // The wtsi-npg dev image's default `replResc` keeps two replicas so
+    // we typically get four total, but other servers policy may differ —
+    // assert pair-shape rather than an exact count.
+    assert!(!timestamps.is_empty(), "at least one timestamp pair");
+    assert_eq!(
+        timestamps.len() % 2,
+        0,
+        "expected paired (created + modified) entries per replica, got {:?}",
+        timestamps
+    );
+
+    // Replica 0 always exists. Verify shape there: each Timestamp has
+    // exactly one of created/modified populated, value is non-empty,
+    // replicate number tags both.
+    let r0_created = timestamps
         .iter()
-        .find(|t| t.created.is_some())
-        .expect("created entry present");
-    assert_eq!(created.modified, None);
-    assert_eq!(created.replicate, Some(0));
+        .find(|t| t.replicate == Some(0) && t.created.is_some())
+        .expect("replica 0 created entry present");
+    assert_eq!(r0_created.modified, None);
     assert!(
-        !created.created.as_ref().unwrap().is_empty(),
+        !r0_created.created.as_ref().unwrap().is_empty(),
         "created timestamp non-empty"
     );
 
-    let modified = timestamps
+    let r0_modified = timestamps
         .iter()
-        .find(|t| t.modified.is_some())
-        .expect("modified entry present");
-    assert_eq!(modified.created, None);
-    assert_eq!(modified.replicate, Some(0));
+        .find(|t| t.replicate == Some(0) && t.modified.is_some())
+        .expect("replica 0 modified entry present");
+    assert_eq!(r0_modified.created, None);
     assert!(
-        !modified.modified.as_ref().unwrap().is_empty(),
+        !r0_modified.modified.as_ref().unwrap().is_empty(),
         "modified timestamp non-empty"
     );
 }
