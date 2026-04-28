@@ -152,11 +152,15 @@ pub fn list_one(
 }
 
 // --- catalog query helpers ----------------------------------------------------
+//
+// These are also used by `crate::operations::metaquery`, hence pub(crate).
+// They stay here rather than moving to a shared module so the per-flag
+// fetchers below can keep using them with no import churn.
 
 /// Default `maxRows` for our catalog queries — picks up most realistic
 /// per-object metadata sets in one round trip; pagination via `query()`
 /// handles the rest transparently.
-const QUERY_PAGE_SIZE: i32 = 500;
+pub(crate) const QUERY_PAGE_SIZE: i32 = 500;
 
 /// Escape single quotes for inclusion in a genQuery WHERE-clause literal.
 ///
@@ -173,13 +177,13 @@ const QUERY_PAGE_SIZE: i32 = 500;
 /// meaning inside literals. If a future iRODS release changes that, the
 /// catalog would refuse the query rather than silently mis-route it —
 /// the caller still gets an error rather than wrong data.
-fn sql_escape(s: &str) -> String {
+pub(crate) fn sql_escape(s: &str) -> String {
     s.replace('\'', "''")
 }
 
 /// Initialise a zeroed `genQueryInp_t` with the standard page size.
 /// Caller is responsible for `clearGenQueryInp` after using it.
-fn new_query_inp() -> MaybeUninit<ffi::genQueryInp_t> {
+pub(crate) fn new_query_inp() -> MaybeUninit<ffi::genQueryInp_t> {
     let mut inp = MaybeUninit::<ffi::genQueryInp_t>::zeroed();
     // SAFETY: the zeroed struct satisfies all field-init requirements;
     // setting maxRows is the only mutation we need before query().
@@ -188,13 +192,13 @@ fn new_query_inp() -> MaybeUninit<ffi::genQueryInp_t> {
 }
 
 /// Add `col` to the SELECT list of `inp` (no aggregation).
-fn add_select(inp: &mut ffi::genQueryInp_t, col: i32) {
+pub(crate) fn add_select(inp: &mut ffi::genQueryInp_t, col: i32) {
     unsafe { ffi::addInxIval(&mut inp.selectInp, col, 0) };
 }
 
 /// Add a WHERE condition to `inp`. `condition` is the operator + literal
 /// the way iRODS's genQuery parser wants it, e.g. `"= '/testZone/home/irods'"`.
-fn add_where(
+pub(crate) fn add_where(
     inp: &mut ffi::genQueryInp_t,
     col: i32,
     condition: &str,
@@ -215,7 +219,7 @@ fn add_where(
 /// iRODS declares `clearGenQueryInp` with a generic `void *` parameter
 /// (it shares the signature with other `clearXxx` helpers). bindgen
 /// reflects that faithfully; we cast through `*mut _` here.
-fn run_query(
+pub(crate) fn run_query(
     conn: &mut RodsConnection,
     inp: &mut ffi::genQueryInp_t,
 ) -> Result<Vec<Vec<String>>, BatonError> {
