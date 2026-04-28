@@ -10,7 +10,7 @@
 use std::process::Command;
 
 use baton_rs::operations::metaquery::{metaquery, MetaqueryFlags};
-use baton_rs::types::{AvuQuery, MetaqueryInput, Operator};
+use baton_rs::types::{AvuQuery, MetaqueryInput, Operator, TimestampQuery};
 use baton_rs::{RodsConnection, Target};
 
 struct IrodsCleanup(String);
@@ -143,6 +143,109 @@ fn metaquery_with_like_operator_finds_glob_match() {
         found,
         "expected data object {} in like-search results, got {:?}",
         remote, results
+    );
+}
+
+#[test]
+fn metaquery_timestamp_range_returns_recent_object() {
+    // iput stamps create_time = "now" on the data object. We then run
+    // two timestamp queries: one with `created >= "0"` (effectively
+    // unconditional — should match), one with `created >= "9999999999"`
+    // (a far-future epoch — should not match). Together they prove the
+    // operator and the column wiring are both honoured.
+    let local = "/tmp/baton_rs_metaquery_ts";
+    std::fs::write(local, b"metaquery ts").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_metaquery_ts";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    // Pin a unique AVU so the result-set check can find the right
+    // object even if another test in this file added a similar record.
+    imeta_add(
+        "-d",
+        &remote,
+        "baton_rs_metaquery_ts_attr",
+        "ts_v",
+        None,
+    );
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // (1) created >= 0 → matches every iput'd object that has a
+    // recorded create time.
+    let input_match = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_metaquery_ts_attr".to_string(),
+            value: "ts_v".to_string(),
+            units: None,
+            operator: Operator::Equals,
+        }],
+        timestamps: vec![TimestampQuery {
+            created: Some("0".to_string()),
+            modified: None,
+            operator: Operator::GreaterThanOrEqual,
+        }],
+        access: vec![],
+        collection: None,
+        zone: None,
+    };
+    let matches_set = metaquery(
+        &mut conn,
+        &input_match,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery (matching timestamp)");
+    assert!(
+        matches_set.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == data_object
+        )),
+        "expected staged object in results, got {:?}",
+        matches_set
+    );
+
+    // (2) created >= "9999999999" → no iput'd object can satisfy this
+    // for ~300 years. Combined with the same AVU constraint, the
+    // staged object should explicitly NOT show up.
+    let input_miss = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_metaquery_ts_attr".to_string(),
+            value: "ts_v".to_string(),
+            units: None,
+            operator: Operator::Equals,
+        }],
+        timestamps: vec![TimestampQuery {
+            created: Some("9999999999".to_string()),
+            modified: None,
+            operator: Operator::GreaterThanOrEqual,
+        }],
+        access: vec![],
+        collection: None,
+        zone: None,
+    };
+    let misses = metaquery(
+        &mut conn,
+        &input_miss,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery (non-matching timestamp)");
+    assert!(
+        !misses.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == data_object
+        )),
+        "expected staged object excluded by future-epoch timestamp filter, got {:?}",
+        misses
     );
 }
 

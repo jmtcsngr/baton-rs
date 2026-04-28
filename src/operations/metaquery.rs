@@ -7,9 +7,11 @@
 //!
 //! Session 4c builds this incrementally:
 //!
-//! - **commit 2 (this commit):** single-AVU search across data objects
-//!   and collections, scoped to a parent `collection` if provided.
-//! - commit 4: timestamp range queries.
+//! - commit 2: single-AVU search across data objects and collections,
+//!   scoped to a parent `collection` if provided.
+//! - **commit 4 (this commit):** timestamp range queries — `created`
+//!   / `modified` filters on each result, applied as additional WHERE
+//!   conditions alongside any AVU criteria.
 //! - commit 5: ACL selectors.
 //! - commit 6: multi-AVU criteria via per-AVU subqueries + result
 //!   intersection (iRODS's `rcGenQuery` doesn't naturally express
@@ -22,7 +24,7 @@ use crate::error::BatonError;
 use crate::ffi;
 use crate::operations::list::{add_select, add_where, new_query_inp, run_query, sql_escape};
 use crate::types::{
-    AvuQuery, Collection, DataObject, MetaqueryInput, Operator, Target,
+    AvuQuery, Collection, DataObject, MetaqueryInput, Operator, Target, TimestampQuery,
 };
 
 /// Which kinds of objects to include in the search.
@@ -50,15 +52,21 @@ impl Default for MetaqueryFlags {
 /// kinds (data objects + collections) are returned in one flat
 /// [`Vec`]; preserve catalog order, no further sorting applied.
 ///
-/// In this commit only a single AVU criterion is honoured. Multi-AVU
-/// inputs run the same query with chained WHERE conditions, which
+/// AVU criteria are applied as multiple WHERE conditions, which
 /// gives iRODS's "any AVU on the object matches all these conditions"
-/// semantic — wrong for a true `AND` interpretation. Commit 6
-/// replaces that with a per-AVU subquery + intersection that matches
-/// baton's documented behaviour.
+/// semantic — wrong for a true `AND` interpretation when more than
+/// one AVU is supplied. Commit 6 replaces that with a per-AVU
+/// subquery + intersection that matches baton's documented
+/// behaviour.
 ///
-/// Timestamps and access selectors are also accepted in `input` but
-/// silently ignored at this stage; commits 4 and 5 wire them in.
+/// Timestamp criteria translate into WHERE conditions on the
+/// `D_CREATE_TIME` / `D_MODIFY_TIME` (or `COLL_*` equivalents)
+/// columns. Values are passed through unmodified — iRODS stores
+/// timestamps as zero-padded epoch strings (e.g. `"01777320246"`),
+/// and the caller is responsible for supplying the same form.
+///
+/// Access selectors are still silently ignored at this stage;
+/// commit 5 wires them in.
 pub fn metaquery(
     conn: &mut RodsConnection,
     input: &MetaqueryInput,
@@ -128,6 +136,7 @@ fn query_data_objects(
     add_select(inp_ref, ffi::COL_DATA_NAME as i32);
 
     apply_avu_conditions_to_data_object(inp_ref, &input.avus)?;
+    apply_timestamp_conditions_to_data_object(inp_ref, &input.timestamps)?;
     apply_collection_scope(inp_ref, input)?;
 
     let rows = run_query(conn, inp_ref)?;
@@ -161,6 +170,7 @@ fn query_collections(
     add_select(inp_ref, ffi::COL_COLL_NAME as i32);
 
     apply_avu_conditions_to_collection(inp_ref, &input.avus)?;
+    apply_timestamp_conditions_to_collection(inp_ref, &input.timestamps)?;
     apply_collection_scope(inp_ref, input)?;
 
     let rows = run_query(conn, inp_ref)?;
@@ -226,6 +236,55 @@ fn apply_avu_conditions_to_collection(
                 inp,
                 ffi::COL_META_COLL_ATTR_UNITS as i32,
                 &format!("= '{}'", sql_escape(units)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply each [`TimestampQuery`] as a WHERE condition on the
+/// data-object create/modify columns. A query with neither `created`
+/// nor `modified` set is silently a no-op.
+fn apply_timestamp_conditions_to_data_object(
+    inp: &mut ffi::genQueryInp_t,
+    timestamps: &[TimestampQuery],
+) -> Result<(), BatonError> {
+    for ts in timestamps {
+        if let Some(created) = &ts.created {
+            add_where(
+                inp,
+                ffi::COL_D_CREATE_TIME as i32,
+                &condition_for(ts.operator, created),
+            )?;
+        }
+        if let Some(modified) = &ts.modified {
+            add_where(
+                inp,
+                ffi::COL_D_MODIFY_TIME as i32,
+                &condition_for(ts.operator, modified),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_timestamp_conditions_to_collection(
+    inp: &mut ffi::genQueryInp_t,
+    timestamps: &[TimestampQuery],
+) -> Result<(), BatonError> {
+    for ts in timestamps {
+        if let Some(created) = &ts.created {
+            add_where(
+                inp,
+                ffi::COL_COLL_CREATE_TIME as i32,
+                &condition_for(ts.operator, created),
+            )?;
+        }
+        if let Some(modified) = &ts.modified {
+            add_where(
+                inp,
+                ffi::COL_COLL_MODIFY_TIME as i32,
+                &condition_for(ts.operator, modified),
             )?;
         }
     }
