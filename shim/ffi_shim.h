@@ -6,16 +6,22 @@
 // baton-rs C shim — stable, version-agnostic API over the iRODS client
 // libraries, narrowed to just the surface baton-rs uses.
 //
-// The point of this layer is to give bindgen a tractable input. iRODS's
-// own headers transitively pull in modern C++ constructs that older
-// libclang releases (notably the 3.8 shipped in Ubuntu 16.04, which is
-// the base for the iRODS 4.2.7 dev image) cannot parse — see issue #9
-// for the full root-cause writeup.
+// The Rust crate links against this and never `#include`s any iRODS
+// header itself. Two motivations, both rooted in issue #9:
 //
-// All iRODS-specific types are kept opaque or remapped to plain-C
-// structs. Per-iRODS-major-version differences (4.2 vs 4.3 vs 5.x)
-// live behind `#ifdef` blocks in `ffi_shim.c`, never in callers'
-// generated bindings.
+//   1. iRODS's own headers transitively pull in modern C++. Building
+//      under the iRODS 4.2.7 dev image (Ubuntu 16.04, libclang 3.8)
+//      means anything that has to *parse* those headers in a Rust
+//      build context is on its own. Hiding them behind a plain-C
+//      shim sidesteps that.
+//
+//   2. A stable shim shape lets per-iRODS-version differences (4.2
+//      vs 4.3 vs 5.x) live behind `#ifdef` blocks in `ffi_shim.c`,
+//      not leak into the Rust side.
+//
+// The Rust-side declarations mirroring this header live in
+// `src/ffi.rs` (hand-written, not generated). When you change a
+// signature here, update that file too.
 
 #ifndef BATON_RS_FFI_SHIM_H
 #define BATON_RS_FFI_SHIM_H
@@ -24,9 +30,10 @@
 extern "C" {
 #endif
 
-// Opaque connection handle. Internally a `rcComm_t *`; the cast happens
-// in `ffi_shim.c`. Bindgen only ever sees the forward declaration, so
-// the iRODS rcComm struct definition never has to flow through libclang.
+// Opaque connection handle. Internally a `rcComm_t *`; the cast
+// happens in `ffi_shim.c`. The Rust mirror is a forward-declared
+// zero-sized struct, so the iRODS `rcComm` definition never has to
+// be expressed in Rust either.
 typedef struct shim_rods_conn shim_rods_conn_t;
 
 // ---- Connection lifecycle ---------------------------------------------------
@@ -116,10 +123,10 @@ typedef struct shim_query_result shim_query_result_t;
 
 // Symbolic identifiers for the iRODS catalog columns baton-rs needs.
 // The shim maps these to the corresponding `COL_*` numeric values at
-// runtime — keeps the iRODS macros (and the `<rodsGenQuery.h>` header
-// that defines them) out of the bindgen input. The numeric values
-// here are arbitrary and only used inside the shim; they do not
-// appear on the wire.
+// runtime — keeps the iRODS macros (and the `<rodsGenQuery.h>`
+// header that defines them) out of the Rust side. The numeric
+// values here are arbitrary and only used inside the shim; they do
+// not appear on the wire.
 typedef enum {
     SHIM_COL_COLL_NAME             = 1,
     SHIM_COL_COLL_PARENT_NAME      = 2,

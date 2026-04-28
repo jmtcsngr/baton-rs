@@ -5,35 +5,32 @@
 
 //! Build script for baton-rs.
 //!
-//! Two pipelines run here:
+//! Compiles `shim/ffi_shim.c` into a static library that the Rust
+//! crate links against. The shim is the only translation unit that
+//! `#include`s the iRODS client headers — every iRODS API call
+//! baton-rs makes flows through it. Per-iRODS-version differences
+//! (4.2 vs 4.3 vs 5.x) live behind `#ifdef`s in the shim.
 //!
-//! 1. **cc** compiles `shim/ffi_shim.c` into a static library that the
-//!    Rust crate links against. The shim is the only translation unit
-//!    that `#include`s the iRODS client headers — every iRODS API
-//!    call baton-rs makes flows through it. Per-iRODS-version
-//!    differences (4.2 vs 4.3 vs 5.x) live behind `#ifdef`s here.
+//! The Rust-side FFI bindings live in `src/ffi.rs` (hand-written to
+//! mirror `shim/ffi_shim.h`). bindgen is intentionally not used:
+//! Ubuntu 16.04 (the iRODS 4.2.7 build image's base) ships
+//! libclang 3.8, which modern bindgen / clang-sys cannot run on
+//! (they require libclang ≥ 5.0 for APIs such as
+//! `clang_getTranslationUnitTargetInfo`). Hand-rolled bindings keep
+//! the build dependency footprint to a C compiler — that, every
+//! supported environment has.
 //!
-//! 2. **bindgen** generates raw FFI bindings for the shim into
-//!    `$OUT_DIR/bindings.rs`. `src/ffi.rs` includes the generated file.
-//!    bindgen reads only `wrapper.h`, which only includes
-//!    `shim/ffi_shim.h` — the iRODS headers are not on the bindgen
-//!    input path. This is what lets us build under libclang 3.8 (the
-//!    Ubuntu-16.04 release shipped with the iRODS 4.2.7 dev image)
-//!    even though the iRODS client headers themselves contain modern
-//!    C++ that 3.8's parser rejects. See issue #9 for the full story.
-
-use std::env;
-use std::path::PathBuf;
+//! See issue #9 for the full Session 4.5 rationale.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=shim/ffi_shim.c");
     println!("cargo:rerun-if-changed=shim/ffi_shim.h");
+    println!("cargo:rerun-if-changed=src/ffi.rs");
 
-    // Compile the C shim into libbaton_rs_shim.a and emit the static-link
-    // directive. iRODS headers are needed here (and only here) so the
-    // shim can call through to them.
+    // Compile the C shim into libbaton_rs_shim.a and emit the
+    // static-link directive. iRODS headers are needed here (and
+    // only here) so the shim can call through to them.
     cc::Build::new()
         .file("shim/ffi_shim.c")
         .include("shim")
@@ -41,39 +38,15 @@ fn main() {
         .warnings(true)
         .compile("baton_rs_shim");
 
-    // Link dynamically against the iRODS client libraries provided by the
-    // iRODS .deb packages (decision recorded in Project constants).
+    // Link dynamically against the iRODS client libraries provided
+    // by the iRODS .deb packages.
     //
-    // iRODS splits its client runtime across at least two shared objects:
-    //   - libirods_client — connection/protocol APIs (rcConnect, clientLogin, …)
+    // iRODS splits its client runtime across at least two shared
+    // objects:
+    //   - libirods_client — connection/protocol APIs (rcConnect, …)
     //   - libirods_common — utilities, including getRodsEnv
-    // If more symbols surface as undefined later, switch to pkg-config.
+    // If more symbols surface as undefined later, switch to
+    // pkg-config.
     println!("cargo:rustc-link-lib=irods_client");
     println!("cargo:rustc-link-lib=irods_common");
-
-    // bindgen sees only the shim header — no `-I/usr/include/irods`
-    // here, no iRODS includes in wrapper.h. The shim's surface is
-    // pure plain-C (POD structs, opaque forward decls, an enum for
-    // the catalog columns we use), so any libclang from 3.8 onward
-    // can parse it. The `shim_.*` wildcards cover every function,
-    // type, and enum value the shim exports.
-    let bindings = bindgen::Builder::default()
-        .header("wrapper.h")
-        .allowlist_function("shim_.*")
-        .allowlist_type("shim_.*")
-        .allowlist_var("SHIM_.*")
-        // Emit `typedef enum { ... } shim_col_t;` variants as flat
-        // top-level constants (`SHIM_COL_FOO`) rather than the
-        // bindgen-default prefixed form (`shim_col_t_SHIM_COL_FOO`).
-        // The shim's enum names are already verbose enough; the extra
-        // typedef prefix is just noise at the call site.
-        .prepend_enum_name(false)
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .generate()
-        .expect("bindgen: failed to generate shim bindings");
-
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("bindings.rs"))
-        .expect("bindgen: failed to write bindings.rs");
 }
