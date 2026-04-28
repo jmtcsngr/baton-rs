@@ -64,9 +64,10 @@ pub struct EnrichOptions {
 ///
 /// One catalog round-trip per requested flag. `--replicate` is silently
 /// a no-op on collections (data-object-only concept); the other three
-/// apply to both kinds. `pub(crate)` because `baton-metaquery` shares
-/// this with `baton-list`; not part of the crate's public API.
-pub(crate) fn enrich_with_metadata(
+/// apply to both kinds. Public because `baton-metaquery` (a separate
+/// binary crate) calls it directly to decorate query results with the
+/// same per-flag behaviour `baton-list` exposes.
+pub fn enrich_with_metadata(
     conn: &mut RodsConnection,
     target: &mut Target,
     opts: &EnrichOptions,
