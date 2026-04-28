@@ -114,6 +114,39 @@ int shim_stat(shim_rods_conn_t *conn, const char *path, shim_stat_t *out);
 typedef struct shim_query        shim_query_t;
 typedef struct shim_query_result shim_query_result_t;
 
+// Symbolic identifiers for the iRODS catalog columns baton-rs needs.
+// The shim maps these to the corresponding `COL_*` numeric values at
+// runtime — keeps the iRODS macros (and the `<rodsGenQuery.h>` header
+// that defines them) out of the bindgen input. The numeric values
+// here are arbitrary and only used inside the shim; they do not
+// appear on the wire.
+typedef enum {
+    SHIM_COL_COLL_NAME             = 1,
+    SHIM_COL_COLL_PARENT_NAME      = 2,
+    SHIM_COL_COLL_CREATE_TIME      = 3,
+    SHIM_COL_COLL_MODIFY_TIME      = 4,
+    SHIM_COL_DATA_NAME             = 5,
+    SHIM_COL_DATA_REPL_NUM         = 6,
+    SHIM_COL_D_DATA_CHECKSUM       = 7,
+    SHIM_COL_D_RESC_NAME           = 8,
+    SHIM_COL_D_CREATE_TIME         = 9,
+    SHIM_COL_D_MODIFY_TIME         = 10,
+    SHIM_COL_D_REPL_STATUS         = 11,
+    SHIM_COL_R_LOC                 = 12,
+    SHIM_COL_META_DATA_ATTR_NAME   = 13,
+    SHIM_COL_META_DATA_ATTR_VALUE  = 14,
+    SHIM_COL_META_DATA_ATTR_UNITS  = 15,
+    SHIM_COL_META_COLL_ATTR_NAME   = 16,
+    SHIM_COL_META_COLL_ATTR_VALUE  = 17,
+    SHIM_COL_META_COLL_ATTR_UNITS  = 18,
+    SHIM_COL_USER_NAME             = 19,
+    SHIM_COL_USER_ZONE             = 20,
+    SHIM_COL_DATA_ACCESS_NAME      = 21,
+    SHIM_COL_COLL_USER_NAME        = 22,
+    SHIM_COL_COLL_USER_ZONE        = 23,
+    SHIM_COL_COLL_ACCESS_NAME      = 24,
+} shim_col_t;
+
 // Allocate a fresh query builder. Returns NULL on out-of-memory.
 shim_query_t *shim_query_new(void);
 
@@ -121,14 +154,15 @@ shim_query_t *shim_query_new(void);
 // (`clearGenQueryInp`). Safe to call with NULL.
 void shim_query_free(shim_query_t *q);
 
-// Append a column index to the SELECT list. Wraps `addInxIval`.
-void shim_query_add_select(shim_query_t *q, int col);
+// Append a column to the SELECT list. Wraps `addInxIval` after
+// translating `col` from the shim enum to the iRODS `COL_*` value.
+void shim_query_add_select(shim_query_t *q, shim_col_t col);
 
 // Append a WHERE condition for `col`. `condition` is the iRODS
 // genQuery condition string (e.g. `"= 'foo'"` or `"like 'bar%'"`) and
 // must be NUL-terminated; the shim copies it via `addInxVal`'s strdup.
 // Returns 0 on success.
-int shim_query_add_where(shim_query_t *q, int col, const char *condition);
+int shim_query_add_where(shim_query_t *q, shim_col_t col, const char *condition);
 
 // Run `q` to completion against `conn`, paging until the catalog
 // stops returning more rows. Returns a non-NULL result handle on

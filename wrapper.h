@@ -3,21 +3,16 @@
 // Last modified by: Claude Opus 4.7 (1M context)
 // Last modified:    2026-04-28
 //
-// bindgen entry point. Two header trees are pulled in here during the
-// Session 4.5 shim migration (issue #9):
+// bindgen entry point. Only the C shim header is exposed — the iRODS
+// client headers are not pulled in here, so libclang never has to
+// parse them. That's the whole point of the Session 4.5 shim work
+// (issue #9): old libclang releases (3.8 on Ubuntu 16.04, used by
+// the iRODS 4.2.7 build image) cannot parse the modern C++ in
+// `<rodsClient.h>`'s transitive includes, but they handle the
+// shim's plain-C surface fine.
 //
-//   1. `<rodsClient.h>` — the iRODS client API. Subsystems that haven't
-//      been moved behind the shim yet still call iRODS symbols directly
-//      (queries, metamod, error-name lookup). The final commit of
-//      Session 4.5 removes this include once every caller has migrated,
-//      narrowing the libclang-visible surface to just the shim.
-//
-//   2. `shim/ffi_shim.h` — the version-agnostic C shim. Once iRODS
-//      headers are dropped, this is the only thing bindgen sees.
-//
-// The set of symbols that actually make it into `bindings.rs` is
-// controlled by the allowlists in build.rs, not by what this header
-// transitively pulls in.
+// Per-iRODS-version differences live behind `#ifdef`s in
+// `shim/ffi_shim.c`, which is the only translation unit that
+// `#include`s the iRODS headers.
 
-#include <rodsClient.h>
 #include "shim/ffi_shim.h"

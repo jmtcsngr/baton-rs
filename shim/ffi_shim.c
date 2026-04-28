@@ -162,16 +162,55 @@ void shim_query_free(shim_query_t *q) {
     free(q);
 }
 
-void shim_query_add_select(shim_query_t *q, int col) {
-    if (!q) return;
-    addInxIval(&q->inp.selectInp, col, 0);
+// Translate the shim's symbolic column id to the iRODS `COL_*`
+// numeric. Centralised here so the call sites never reference the
+// iRODS macros directly. Returns -1 for an unknown id; callers treat
+// that as "skip" rather than propagate an error, since the only way
+// to get here is a programmer mistake on the Rust side.
+static int translate_col(shim_col_t col) {
+    switch (col) {
+    case SHIM_COL_COLL_NAME:             return COL_COLL_NAME;
+    case SHIM_COL_COLL_PARENT_NAME:      return COL_COLL_PARENT_NAME;
+    case SHIM_COL_COLL_CREATE_TIME:      return COL_COLL_CREATE_TIME;
+    case SHIM_COL_COLL_MODIFY_TIME:      return COL_COLL_MODIFY_TIME;
+    case SHIM_COL_DATA_NAME:             return COL_DATA_NAME;
+    case SHIM_COL_DATA_REPL_NUM:         return COL_DATA_REPL_NUM;
+    case SHIM_COL_D_DATA_CHECKSUM:       return COL_D_DATA_CHECKSUM;
+    case SHIM_COL_D_RESC_NAME:           return COL_D_RESC_NAME;
+    case SHIM_COL_D_CREATE_TIME:         return COL_D_CREATE_TIME;
+    case SHIM_COL_D_MODIFY_TIME:         return COL_D_MODIFY_TIME;
+    case SHIM_COL_D_REPL_STATUS:         return COL_D_REPL_STATUS;
+    case SHIM_COL_R_LOC:                 return COL_R_LOC;
+    case SHIM_COL_META_DATA_ATTR_NAME:   return COL_META_DATA_ATTR_NAME;
+    case SHIM_COL_META_DATA_ATTR_VALUE:  return COL_META_DATA_ATTR_VALUE;
+    case SHIM_COL_META_DATA_ATTR_UNITS:  return COL_META_DATA_ATTR_UNITS;
+    case SHIM_COL_META_COLL_ATTR_NAME:   return COL_META_COLL_ATTR_NAME;
+    case SHIM_COL_META_COLL_ATTR_VALUE:  return COL_META_COLL_ATTR_VALUE;
+    case SHIM_COL_META_COLL_ATTR_UNITS:  return COL_META_COLL_ATTR_UNITS;
+    case SHIM_COL_USER_NAME:             return COL_USER_NAME;
+    case SHIM_COL_USER_ZONE:             return COL_USER_ZONE;
+    case SHIM_COL_DATA_ACCESS_NAME:      return COL_DATA_ACCESS_NAME;
+    case SHIM_COL_COLL_USER_NAME:        return COL_COLL_USER_NAME;
+    case SHIM_COL_COLL_USER_ZONE:        return COL_COLL_USER_ZONE;
+    case SHIM_COL_COLL_ACCESS_NAME:      return COL_COLL_ACCESS_NAME;
+    }
+    return -1;
 }
 
-int shim_query_add_where(shim_query_t *q, int col, const char *condition) {
+void shim_query_add_select(shim_query_t *q, shim_col_t col) {
+    if (!q) return;
+    int icol = translate_col(col);
+    if (icol < 0) return;
+    addInxIval(&q->inp.selectInp, icol, 0);
+}
+
+int shim_query_add_where(shim_query_t *q, shim_col_t col, const char *condition) {
     if (!q || !condition) return -1;
+    int icol = translate_col(col);
+    if (icol < 0) return -1;
     // addInxVal strdup's the condition string internally, so the
     // caller's buffer can be freed immediately after.
-    addInxVal(&q->inp.sqlCondInp, col, (char *)condition);
+    addInxVal(&q->inp.sqlCondInp, icol, (char *)condition);
     return 0;
 }
 

@@ -158,8 +158,8 @@ fn query_data_objects(
 ) -> Result<Vec<Target>, BatonError> {
     let mut q = GenQuery::new();
 
-    q.add_select(ffi::COL_COLL_NAME as i32);
-    q.add_select(ffi::COL_DATA_NAME as i32);
+    q.add_select(ffi::SHIM_COL_COLL_NAME);
+    q.add_select(ffi::SHIM_COL_DATA_NAME);
 
     apply_avu_conditions_to_data_object(&mut q, &input.avus)?;
     apply_timestamp_conditions_to_data_object(&mut q, &input.timestamps)?;
@@ -251,7 +251,7 @@ fn query_collections(
 ) -> Result<Vec<Target>, BatonError> {
     let mut q = GenQuery::new();
 
-    q.add_select(ffi::COL_COLL_NAME as i32);
+    q.add_select(ffi::SHIM_COL_COLL_NAME);
 
     apply_avu_conditions_to_collection(&mut q, &input.avus)?;
     apply_timestamp_conditions_to_collection(&mut q, &input.timestamps)?;
@@ -332,16 +332,16 @@ fn apply_avu_conditions_to_data_object(
 ) -> Result<(), BatonError> {
     for avu in avus {
         q.add_where(
-            ffi::COL_META_DATA_ATTR_NAME as i32,
+            ffi::SHIM_COL_META_DATA_ATTR_NAME,
             &format!("= '{}'", sql_escape(&avu.attribute)),
         )?;
         q.add_where(
-            ffi::COL_META_DATA_ATTR_VALUE as i32,
+            ffi::SHIM_COL_META_DATA_ATTR_VALUE,
             &condition_for(avu.operator, &avu.value),
         )?;
         if let Some(units) = &avu.units {
             q.add_where(
-                ffi::COL_META_DATA_ATTR_UNITS as i32,
+                ffi::SHIM_COL_META_DATA_ATTR_UNITS,
                 &format!("= '{}'", sql_escape(units)),
             )?;
         }
@@ -355,16 +355,16 @@ fn apply_avu_conditions_to_collection(
 ) -> Result<(), BatonError> {
     for avu in avus {
         q.add_where(
-            ffi::COL_META_COLL_ATTR_NAME as i32,
+            ffi::SHIM_COL_META_COLL_ATTR_NAME,
             &format!("= '{}'", sql_escape(&avu.attribute)),
         )?;
         q.add_where(
-            ffi::COL_META_COLL_ATTR_VALUE as i32,
+            ffi::SHIM_COL_META_COLL_ATTR_VALUE,
             &condition_for(avu.operator, &avu.value),
         )?;
         if let Some(units) = &avu.units {
             q.add_where(
-                ffi::COL_META_COLL_ATTR_UNITS as i32,
+                ffi::SHIM_COL_META_COLL_ATTR_UNITS,
                 &format!("= '{}'", sql_escape(units)),
             )?;
         }
@@ -382,13 +382,13 @@ fn apply_timestamp_conditions_to_data_object(
     for ts in timestamps {
         if let Some(created) = &ts.created {
             q.add_where(
-                ffi::COL_D_CREATE_TIME as i32,
+                ffi::SHIM_COL_D_CREATE_TIME,
                 &condition_for(ts.operator, created),
             )?;
         }
         if let Some(modified) = &ts.modified {
             q.add_where(
-                ffi::COL_D_MODIFY_TIME as i32,
+                ffi::SHIM_COL_D_MODIFY_TIME,
                 &condition_for(ts.operator, modified),
             )?;
         }
@@ -403,13 +403,13 @@ fn apply_timestamp_conditions_to_collection(
     for ts in timestamps {
         if let Some(created) = &ts.created {
             q.add_where(
-                ffi::COL_COLL_CREATE_TIME as i32,
+                ffi::SHIM_COL_COLL_CREATE_TIME,
                 &condition_for(ts.operator, created),
             )?;
         }
         if let Some(modified) = &ts.modified {
             q.add_where(
-                ffi::COL_COLL_MODIFY_TIME as i32,
+                ffi::SHIM_COL_COLL_MODIFY_TIME,
                 &condition_for(ts.operator, modified),
             )?;
         }
@@ -441,16 +441,16 @@ fn apply_access_conditions_to_data_object(
 ) -> Result<(), BatonError> {
     for a in accesses {
         q.add_where(
-            ffi::COL_USER_NAME as i32,
+            ffi::SHIM_COL_USER_NAME,
             &format!("= '{}'", sql_escape(&a.owner)),
         )?;
         q.add_where(
-            ffi::COL_DATA_ACCESS_NAME as i32,
+            ffi::SHIM_COL_DATA_ACCESS_NAME,
             &format!("= '{}'", acl_level_to_irods_name(a.level)),
         )?;
         if let Some(zone) = &a.zone {
             q.add_where(
-                ffi::COL_USER_ZONE as i32,
+                ffi::SHIM_COL_USER_ZONE,
                 &format!("= '{}'", sql_escape(zone)),
             )?;
         }
@@ -469,16 +469,16 @@ fn apply_access_conditions_to_collection(
 ) -> Result<(), BatonError> {
     for a in accesses {
         q.add_where(
-            ffi::COL_COLL_USER_NAME as i32,
+            ffi::SHIM_COL_COLL_USER_NAME,
             &format!("= '{}'", sql_escape(&a.owner)),
         )?;
         q.add_where(
-            ffi::COL_COLL_ACCESS_NAME as i32,
+            ffi::SHIM_COL_COLL_ACCESS_NAME,
             &format!("= '{}'", acl_level_to_irods_name(a.level)),
         )?;
         if let Some(zone) = &a.zone {
             q.add_where(
-                ffi::COL_COLL_USER_ZONE as i32,
+                ffi::SHIM_COL_COLL_USER_ZONE,
                 &format!("= '{}'", sql_escape(zone)),
             )?;
         }
@@ -503,7 +503,7 @@ fn apply_collection_scope(
         // (matches baton's --collection scope which is recursive).
         let pattern = format!("{}%", sql_escape(scope));
         q.add_where(
-            ffi::COL_COLL_NAME as i32,
+            ffi::SHIM_COL_COLL_NAME,
             &format!("like '{}'", pattern),
         )?;
     }

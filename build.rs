@@ -7,17 +7,20 @@
 //!
 //! Two pipelines run here:
 //!
-//! 1. **bindgen** generates raw FFI bindings from `wrapper.h` (which
-//!    transitively includes the iRODS client headers) into
-//!    `$OUT_DIR/bindings.rs`, and emits link directives for the iRODS
-//!    client library. `src/ffi.rs` includes the generated file.
+//! 1. **cc** compiles `shim/ffi_shim.c` into a static library that the
+//!    Rust crate links against. The shim is the only translation unit
+//!    that `#include`s the iRODS client headers — every iRODS API
+//!    call baton-rs makes flows through it. Per-iRODS-version
+//!    differences (4.2 vs 4.3 vs 5.x) live behind `#ifdef`s here.
 //!
-//! 2. **cc** compiles `shim/ffi_shim.c` into a static library that the
-//!    Rust crate links against. The shim is the version-agnostic API
-//!    layer being built up over Session 4.5 (issue #9). At this stage
-//!    it has no functions yet — the build pipeline is in place so each
-//!    subsystem migration in subsequent commits can drop a function in
-//!    without further build-system churn.
+//! 2. **bindgen** generates raw FFI bindings for the shim into
+//!    `$OUT_DIR/bindings.rs`. `src/ffi.rs` includes the generated file.
+//!    bindgen reads only `wrapper.h`, which only includes
+//!    `shim/ffi_shim.h` — the iRODS headers are not on the bindgen
+//!    input path. This is what lets us build under libclang 3.8 (the
+//!    Ubuntu-16.04 release shipped with the iRODS 4.2.7 dev image)
+//!    even though the iRODS client headers themselves contain modern
+//!    C++ that 3.8's parser rejects. See issue #9 for the full story.
 
 use std::env;
 use std::path::PathBuf;
@@ -29,9 +32,8 @@ fn main() {
     println!("cargo:rerun-if-changed=shim/ffi_shim.h");
 
     // Compile the C shim into libbaton_rs_shim.a and emit the static-link
-    // directive. iRODS headers are made available so the shim can call
-    // through to them as functions are added in later commits — the shim
-    // is the only TU that #includes them at the point we narrow bindgen.
+    // directive. iRODS headers are needed here (and only here) so the
+    // shim can call through to them.
     cc::Build::new()
         .file("shim/ffi_shim.c")
         .include("shim")
@@ -49,36 +51,20 @@ fn main() {
     println!("cargo:rustc-link-lib=irods_client");
     println!("cargo:rustc-link-lib=irods_common");
 
+    // bindgen sees only the shim header — no `-I/usr/include/irods`
+    // here, no iRODS includes in wrapper.h. The shim's surface is
+    // pure plain-C (POD structs, opaque forward decls, an enum for
+    // the catalog columns we use), so any libclang from 3.8 onward
+    // can parse it. The `shim_.*` wildcards cover every function,
+    // type, and enum value the shim exports.
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
-        .clang_arg("-I/usr/include/irods")
-        // Shim functions / types — the version-agnostic C surface from
-        // `shim/ffi_shim.h`. Every subsystem migrated in Session 4.5
-        // calls these instead of the raw iRODS API. The opaque
-        // `shim_rods_conn` / `shim_query` / `shim_query_result`
-        // forward declarations come through the type wildcard, so Rust
-        // holds `*mut ffi::shim_*` pointers without bindgen ever seeing
-        // the underlying iRODS struct definitions.
         .allowlist_function("shim_.*")
         .allowlist_type("shim_.*")
-        // No iRODS functions or structs are called from Rust any
-        // longer — every subsystem (connection, queries, metamod,
-        // error-name lookup) goes through `shim/ffi_shim.{c,h}`.
-        // Commit 6 of Session 4.5 takes the next step: removing
-        // `<rodsClient.h>` from `wrapper.h` so libclang no longer has
-        // to parse the iRODS headers at all, and flipping iRODS 4.2.7
-        // back from `experimental: true` in CI.
-        // Error code constants used when translating iRODS codes into
-        // BatonError. The allowlist is broad on purpose — constants are cheap.
-        .allowlist_var("CAT_.*")
-        .allowlist_var("SYS_.*")
-        .allowlist_var("AUTH_.*")
-        .allowlist_var("USER_.*")
-        // Catalog column numeric indices used in SELECT / WHERE.
-        .allowlist_var("COL_.*")
+        .allowlist_var("SHIM_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
-        .expect("bindgen: failed to generate iRODS bindings");
+        .expect("bindgen: failed to generate shim bindings");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings

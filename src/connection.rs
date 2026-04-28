@@ -72,15 +72,21 @@ impl GenQuery {
         Self { handle }
     }
 
-    /// Add `col` to the SELECT list (no aggregation).
-    pub(crate) fn add_select(&mut self, col: i32) {
+    /// Add `col` to the SELECT list (no aggregation). `col` is one of
+    /// the `ffi::SHIM_COL_*` enum values; the shim translates to the
+    /// iRODS `COL_*` numeric internally.
+    pub(crate) fn add_select(&mut self, col: ffi::shim_col_t) {
         unsafe { ffi::shim_query_add_select(self.handle, col) };
     }
 
     /// Add a WHERE condition. `condition` is the operator + literal in
     /// the form iRODS's genQuery parser wants, e.g. `"= '/zone/home'"`.
     /// Returns an error if `condition` contains an interior NUL.
-    pub(crate) fn add_where(&mut self, col: i32, condition: &str) -> Result<(), BatonError> {
+    pub(crate) fn add_where(
+        &mut self,
+        col: ffi::shim_col_t,
+        condition: &str,
+    ) -> Result<(), BatonError> {
         let c = CString::new(condition).map_err(|_| BatonError {
             code: -1,
             message: "WHERE condition contains interior NUL".to_string(),
