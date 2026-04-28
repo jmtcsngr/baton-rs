@@ -7,7 +7,7 @@
 //! asserts that the staged path turns up in the results. Drop guards
 //! tear down on Drop (including across panic).
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use baton_rs::operations::metaquery::{metaquery, MetaqueryFlags};
 use baton_rs::types::{AccessQuery, AclLevel, AvuQuery, MetaqueryInput, Operator, TimestampQuery};
@@ -26,6 +26,20 @@ fn iput(local: &str, remote: &str) {
         .status()
         .expect("failed to spawn iput");
     assert!(status.success(), "iput {} {} failed", local, remote);
+}
+
+/// Returns true iff iRODS has a user with the given name. Uses
+/// `iuserinfo`, which exits with status 0 when the user exists and
+/// non-zero otherwise. Stdout/stderr suppressed because we only care
+/// about the exit code.
+fn user_exists(name: &str) -> bool {
+    Command::new("iuserinfo")
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn imeta_add(kind_flag: &str, path: &str, attr: &str, value: &str, units: Option<&str>) {
@@ -312,6 +326,18 @@ fn metaquery_access_selector_finds_owned_object() {
 
     // Negative case: same AVU, but require a non-existent owner. The
     // staged object should NOT show up.
+    //
+    // Generate a per-process suffix so the bogus name is essentially
+    // guaranteed not to match any real user, even across re-runs in
+    // shared environments. Then assert up-front that no such user
+    // exists — turns "no real user has this name" from an implicit
+    // assumption into a checked precondition.
+    let bogus_owner = format!("baton_rs_no_such_user_{}", std::process::id());
+    assert!(
+        !user_exists(&bogus_owner),
+        "test prerequisite violated: iRODS already has a user named {bogus_owner:?}; \
+         the negative-case assertion below would not be meaningful",
+    );
     let input_no_match = MetaqueryInput {
         avus: vec![AvuQuery {
             attribute: "baton_rs_metaquery_acl_attr".to_string(),
@@ -321,7 +347,7 @@ fn metaquery_access_selector_finds_owned_object() {
         }],
         timestamps: vec![],
         access: vec![AccessQuery {
-            owner: "definitely_not_a_real_user".to_string(),
+            owner: bogus_owner,
             level: AclLevel::Own,
             zone: None,
         }],
