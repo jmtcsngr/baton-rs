@@ -385,12 +385,25 @@ impl RodsConnection {
         // shim sanity-checks buf_len ≥ 64 before delegating to obfGetPw.
         let mut password: [std::os::raw::c_char; 128] = [0; 128];
 
+        // Stack arrays aren't auto-zeroed at function exit, so leaving
+        // the plaintext sitting on the stack after we're done with it
+        // would extend the window of exposure to anything inspecting
+        // process memory (panic unwinders, core dumps, attached
+        // debuggers). `write_volatile` keeps the compiler from
+        // optimising the writes away. The closure runs unconditionally
+        // before each return so an early failure (e.g. a partial
+        // obfGetPw write) doesn't leave bytes behind.
+        let zero_password = |buf: &mut [std::os::raw::c_char; 128]| {
+            for byte in buf.iter_mut() {
+                unsafe { std::ptr::write_volatile(byte, 0) };
+            }
+        };
+
         let status = unsafe {
             ffi::shim_get_password(password.as_mut_ptr(), password.len() as std::os::raw::c_int)
         };
         if status != 0 {
-            // password is still all-zero from the array initialiser; no
-            // sensitive bytes to scrub on this path.
+            zero_password(&mut password);
             return Err(BatonError::from_irods_with_context(
                 status,
                 "shim_get_password failed (is .irodsA present?)",
@@ -398,16 +411,7 @@ impl RodsConnection {
         }
 
         let status = unsafe { ffi::shim_login_password(self.conn, password.as_ptr()) };
-
-        // Zero the password buffer regardless of the login outcome.
-        // Stack arrays aren't auto-zeroed at function exit, so leaving
-        // the plaintext sitting on the stack would extend the window of
-        // exposure to anything inspecting process memory (panic
-        // unwinders, core dumps, attached debuggers). write_volatile
-        // prevents the compiler from optimising the writes away.
-        for byte in password.iter_mut() {
-            unsafe { std::ptr::write_volatile(byte, 0) };
-        }
+        zero_password(&mut password);
 
         if status != 0 {
             return Err(BatonError::from_irods(status));

@@ -265,10 +265,16 @@ shim_query_result_t *shim_query_exec(
         if (status == SHIM_CAT_NO_ROWS_FOUND) {
             // Empty page on first iteration ⇒ zero-row result; on a
             // later iteration this just means we've drained the pages.
+            // iRODS shouldn't allocate *out alongside this status, but
+            // free defensively so a future change can't leak.
+            if (out) freeGenQueryOut(&out);
             break;
         }
         if (status < 0) {
             if (status_out) *status_out = status;
+            // Same defensive free — iRODS typically leaves *out NULL on
+            // error, but if it ever sets a partial result we'd leak it.
+            if (out) freeGenQueryOut(&out);
             free_in_progress(values, filled, result);
             return NULL;
         }
