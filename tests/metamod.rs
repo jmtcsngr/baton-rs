@@ -226,3 +226,117 @@ fn metamod_empty_avus_is_no_op() {
     assert_eq!(output.error, None);
     assert!(output.avus.is_empty());
 }
+
+#[test]
+fn metamod_multi_avu_stops_at_first_error_and_preserves_partial_state() {
+    // metamod_one iterates input.avus and stops on the first per-AVU
+    // failure. Earlier AVUs that already succeeded are NOT rolled back —
+    // iRODS exposes no transaction over individual AVU modifications.
+    // This test pins both halves of that contract:
+    //   - the second AVU has an interior NUL in its attribute, which
+    //     CString::new rejects, surfacing as a BatonError mid-iteration.
+    //   - we then verify via `imeta ls` that the first AVU is recorded
+    //     and the third AVU was skipped (iteration halted at the second).
+    let local = "/tmp/baton_rs_metamod_partial";
+    std::fs::write(local, b"partial").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_metamod_partial";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = MetamodInput {
+        collection: remote_coll.to_string(),
+        data_object: Some(data_object.to_string()),
+        operation: MetamodOperation::Add,
+        avus: vec![
+            Avu {
+                attribute: "baton_rs_partial_first".to_string(),
+                value: "first_v".to_string(),
+                units: None,
+            },
+            Avu {
+                attribute: "baton_rs_partial_NUL\0break".to_string(),
+                value: "irrelevant".to_string(),
+                units: None,
+            },
+            Avu {
+                attribute: "baton_rs_partial_third".to_string(),
+                value: "third_v".to_string(),
+                units: None,
+            },
+        ],
+        error: None,
+    };
+
+    let result = metamod_one(&mut conn, input);
+    assert!(
+        result.is_err(),
+        "expected error on AVU with interior NUL byte, got {:?}",
+        result
+    );
+
+    let listing = imeta_ls("-d", &remote);
+    assert!(
+        listing.contains("baton_rs_partial_first") && listing.contains("first_v"),
+        "first AVU should have been added before the iteration stopped:\n{}",
+        listing,
+    );
+    assert!(
+        !listing.contains("baton_rs_partial_third"),
+        "third AVU should not have been added (iteration halted at the failing second AVU):\n{}",
+        listing,
+    );
+}
+
+#[test]
+fn metamod_add_avu_with_special_characters_preserves_value() {
+    // Catch any silent corruption in the path from caller -> CString ->
+    // rcModAVUMetadata -> iRODS catalog -> imeta ls. mod_avu doesn't go
+    // through sql_escape (the FFI path is binary-safe), so the worry
+    // here isn't injection but byte-level round-trip integrity for
+    // values that exercise quoting and non-ASCII handling.
+    let local = "/tmp/baton_rs_metamod_special";
+    std::fs::write(local, b"special").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_metamod_special";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // Single quote, non-ASCII characters.
+    let tricky_value = "O'Brien — résumé";
+    let tricky_units = "£/m²";
+
+    let input = MetamodInput {
+        collection: remote_coll.to_string(),
+        data_object: Some(data_object.to_string()),
+        operation: MetamodOperation::Add,
+        avus: vec![Avu {
+            attribute: "baton_rs_special_attr".to_string(),
+            value: tricky_value.to_string(),
+            units: Some(tricky_units.to_string()),
+        }],
+        error: None,
+    };
+
+    metamod_one(&mut conn, input).expect("metamod_one with special characters");
+
+    let listing = imeta_ls("-d", &remote);
+    assert!(
+        listing.contains(tricky_value),
+        "value with single-quote and non-ASCII should round-trip exactly:\nexpected substring: {tricky_value:?}\nimeta listing:\n{listing}",
+    );
+    assert!(
+        listing.contains(tricky_units),
+        "units with non-ASCII should round-trip exactly:\nexpected substring: {tricky_units:?}\nimeta listing:\n{listing}",
+    );
+}

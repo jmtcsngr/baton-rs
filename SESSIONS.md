@@ -195,21 +195,49 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 4 — baton-metamod and baton-metaquery
 
-**Status:** `<not started>`
+**Status:** completed on 2026-04-28
 
 **Goal:** AVU add/remove and metadata queries with all operators, timestamp ranges, ACL selectors.
 
-**Completed:**
-- `<fill in>`
+**Completed (split across three branches: 4a, 4b, 4c):**
+- **4a — shared decoration helper.** Extracted `EnrichOptions { avu, acl, replicate, timestamp }` and `pub fn enrich_with_metadata(conn, &mut Target, &EnrichOptions)` from `operations::list::list_one`. Front-loaded so 4c could decorate query results without duplicating the per-flag dispatch. `list_one`'s body simplified to `stat → apply size/checksum → enrich_with_metadata → handle contents`. Behaviour-preserving — no integration tests changed.
+- **4b — `baton-metamod`.** First binary that mutates iRODS state.
+  - Schema: `MetamodInput { collection, data_object?, operation: MetamodOperation, avus, error }` plus the lowercase-serialised `MetamodOperation { Add, Rm }`. Sibling of `Target` rather than a wrapper, since flattening an untagged enum into a struct fights serde.
+  - FFI: `rcModAVUMetadata` + `modAVUMetadataInp_t` (stringly-typed `arg0..arg9` layout: operation / target-type-flag / path / attribute / value / units).
+  - `RodsConnection::mod_avu(operation, &target, &avu)` hides that layout behind a typed Rust API; CStrings drop after the call returns.
+  - `operations::metamod::{metamod_one, metamod_one_annotated}` + the `baton-metamod` binary CLI. Per-input operation lives in the JSON envelope so a single stream can mix adds and removes. Empty `avus` is a successful no-op.
+  - `tests/metamod.rs` covers add+rm on data objects, add on collections, the in-band error path, and the empty-vec no-op.
+- **4c — `baton-metaquery`.** First binary that reads-only the catalog.
+  - Schema: `AvuQuery { attribute, value, units?, operator (default Equals) }`, `TimestampQuery { created?, modified?, operator }`, `AccessQuery { owner, level, zone? }`, `MetaqueryInput { avus, timestamps, access, collection?, zone? }`. `Operator` enum gained `Default` (variant `Equals`) so query inputs can omit the operator and serde fills it in.
+  - `operations/metaquery.rs` translates each criterion into iRODS `genQueryInp_t` WHERE conditions:
+    - AVU: `META_DATA_*` / `META_COLL_*` columns with the operator-prefixed value literal.
+    - Timestamps: `D_CREATE_TIME` / `D_MODIFY_TIME` (data) and `COLL_*` (collections), zero-padded epoch values passed through.
+    - ACL: `(owner, level [, zone])` with the `read object` / `modify object` translation; data-object path joins via `COL_USER_*`, collection path via `COL_COLL_USER_*` (the same split that bit us in 3b).
+    - Multi-AVU criteria run as per-AVU subqueries with `HashSet` intersection on the result paths — iRODS's genQuery doesn't naturally express metadata self-joins, so chaining `META_*_ATTR_NAME` constraints in one query asks for an impossible single AVU row.
+  - `baton-metaquery` binary: clap-parsed `--obj` / `--coll` scoping, plus the same per-flag output decoration `baton-list` exposes (`--size`/`--checksum`/`--avu`/`--acl`/`--replicate`/`--timestamp`). Per-result decoration is best-effort — any per-result failure annotates `error` and the stream continues; query-construction failures still propagate.
+  - `tests/metaquery.rs` covers AVU `=` and `like`, empty-input short-circuit, timestamp range (matching + future-epoch exclude), ACL selector (positive + negative with a PID-suffixed bogus user that's verified non-existent via `iquest`), and multi-AVU intersection (one obj has both AVUs, one has only one — assert both in/out behaviours).
+- **Genquery helpers shared.** `new_query_inp` / `add_select` / `add_where` / `run_query` / `sql_escape` / `QUERY_PAGE_SIZE` in `operations::list` flipped to `pub(crate)` so `metaquery` can reuse them without a parallel implementation. Stayed in `list.rs` (no churn for the existing fetchers).
 
 **Deferred / known gaps:**
-- `<fill in>`
+- **`zone` scoping in `MetaqueryInput`** is parsed and accepted but not yet wired into the query — iRODS's default genQuery is local-zone only; cross-zone querying needs a different API entry point (`zone-hint` plumbing or `rcGenQuery`-with-zone-route).
+- **`Operator::In` value handling**: `condition_for` passes through unescaped on the assumption that the caller has already formatted the parenthesised list (`('a','b','c')`). Documented but not validated.
+- **Multi-AVU subqueries fan out as N round-trips**, not one. Acceptable for typical search-by-AVU sizes; if performance bites under load, look at iRODS specific queries (`rcSpecificQuery`) which can express the self-join in a single call.
+- **`baton-metaquery` reads NDJSON**: each line is a separate query, results are concatenated with no per-query delimiter on stdout. Callers correlating multiple queries in one invocation have to know how many results each produces. Adding a per-query delimiter line would be a Session 8 polish item if it ever matters.
+- **Auth schemes other than native** (PAM/GSI/Kerberos) — still on hold; the `clientLogin` workaround in #10 only ever matters if a future session adds those.
 
 **Decisions made:**
-- `<fill in>`
+- **Session split into 4a/4b/4c**, with 4a as a behaviour-preserving extract before either binary's body grows. Pattern worked for Session 3 too; keeping it.
+- **Per-input operation in `MetamodInput`** rather than a CLI flag — matches baton, lets one stream mix adds and removes.
+- **`MetamodInput` is a sibling of `Target`, not a wrapper.** Flattening Target via `#[serde(flatten)]` on an untagged enum fights serde's resolution rules; a focused struct with a `target()` accessor is cheaper.
+- **Multi-AVU = result intersection**, not a single complex query. Documented in the metaquery doc comment with the "what's wrong with the chained-WHERE alternative" rationale, so future readers don't try to "simplify" it.
+- **`Operator` enum gains `Default = Equals`.** The query types use it via `#[serde(default)]` so callers can omit the operator field and get the most common case for free.
+- **Per-result decoration in `baton-metaquery` matches `baton-list`'s flag set.** Sharing `enrich_with_metadata` made this a one-liner; without 4a it would have been ~40 lines of duplication.
+- **`iuserinfo` is unreliable for existence checks**; switched to `iquest` after the live test caught a false-positive. Captured in the test helper's doc comment so the next person doesn't relearn it.
 
-**Open questions for next session:**
-- `<fill in>`
+**Open questions for next session (Session 5 — baton-get + baton-put):**
+- Streaming MD5 verification — does iRODS expose an incremental hash API on the put path, or do we compute server-side after the put completes? Affects how `--verify` is wired.
+- Replicate handling: which replica's size to report when a data object has multiple replicas with different sizes (mid-replication state)? PLAN.md says "size of the latest-numbered replicate"; need to confirm against baton's behaviour.
+- Long-running put/get implies the `--connect-time` reconnect primitive from Session 2 finally has a real consumer. Wire the time check into the put/get loop, or leave it manual?
 
 ---
 
@@ -320,3 +348,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-24` — Session 1 completed: JSON data model and stub binaries.
 - `2026-04-24` — Session 2 completed: iRODS FFI + RodsConnection (connect, login, reconnect). 4.2.7 flipped experimental (issue #9); auth bypasses clientLogin (issue #10).
 - `2026-04-27` — Session 3 completed across three branches: 3a (CLI harness + size/checksum + in-band errors), 3b (avu/acl/replicate/timestamp via rcGenQuery), 3c (contents + best-effort compat test). First real binary on the FFI substrate.
+- `2026-04-28` — Session 4 completed across three branches: 4a (extract enrich_with_metadata), 4b (baton-metamod via rcModAVUMetadata), 4c (baton-metaquery with single/multi-AVU + timestamp + ACL + scope). First binary that mutates iRODS state and first that uses the Operator enum from Session 1.
