@@ -50,6 +50,59 @@ pub struct RodsConnection {
     conn: *mut ffi::shim_rods_conn,
 }
 
+/// Builder over an iRODS general query (`genQueryInp_t`), held opaque
+/// behind the C shim. Construct one with [`GenQuery::new`], populate
+/// the SELECT and WHERE lists, then run it through
+/// [`RodsConnection::query`]. Dropping a `GenQuery` frees the
+/// underlying iRODS state via `clearGenQueryInp`.
+///
+/// `pub(crate)` because the per-flag fetchers in `crate::operations`
+/// are the only callers; we don't expose a low-level query builder
+/// across the public crate boundary.
+pub(crate) struct GenQuery {
+    handle: *mut ffi::shim_query,
+}
+
+impl GenQuery {
+    pub(crate) fn new() -> Self {
+        let handle = unsafe { ffi::shim_query_new() };
+        // Only failure mode is calloc OOM at construct time. Panicking
+        // is appropriate — there's no useful work the caller can do
+        // when the allocator is exhausted.
+        assert!(!handle.is_null(), "shim_query_new returned NULL");
+        Self { handle }
+    }
+
+    /// Add `col` to the SELECT list (no aggregation).
+    pub(crate) fn add_select(&mut self, col: i32) {
+        unsafe { ffi::shim_query_add_select(self.handle, col) };
+    }
+
+    /// Add a WHERE condition. `condition` is the operator + literal in
+    /// the form iRODS's genQuery parser wants, e.g. `"= '/zone/home'"`.
+    /// Returns an error if `condition` contains an interior NUL.
+    pub(crate) fn add_where(&mut self, col: i32, condition: &str) -> Result<(), BatonError> {
+        let c = CString::new(condition).map_err(|_| BatonError {
+            code: -1,
+            message: "WHERE condition contains interior NUL".to_string(),
+        })?;
+        let status = unsafe { ffi::shim_query_add_where(self.handle, col, c.as_ptr()) };
+        if status != 0 {
+            return Err(BatonError::from_irods(status));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for GenQuery {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::shim_query_free(self.handle) };
+            self.handle = std::ptr::null_mut();
+        }
+    }
+}
+
 impl RodsConnection {
     /// Open a connection using the iRODS environment file at
     /// `$HOME/.irods/irods_environment.json`.
@@ -142,84 +195,52 @@ impl RodsConnection {
         })
     }
 
-    /// Execute a prepared `genQueryInp_t` and return every matching row as
-    /// a flat `Vec<Vec<String>>`. Pagination via `continueInx` is handled
-    /// internally — callers see one combined result.
+    /// Execute a prepared [`GenQuery`] and return every matching row as
+    /// a flat `Vec<Vec<String>>`. Pagination is handled inside the
+    /// shim's `shim_query_exec` — callers see one combined result.
     ///
-    /// The caller is responsible for populating the SELECT / WHERE pairs
-    /// (via `addInxIval` / `addInxVal`) and for calling
-    /// `clearGenQueryInp` on the input after this method returns.
-    /// `CAT_NO_ROWS_FOUND` is treated as a normal empty result, not an
-    /// error — any other negative status becomes a `BatonError`.
+    /// `CAT_NO_ROWS_FOUND` is treated as an empty result, not an error
+    /// (the shim absorbs that). Any other negative iRODS status
+    /// becomes a `BatonError`.
     ///
-    /// `pub(crate)` because the `genQueryInp_t` type is crate-internal; we
-    /// don't want to leak raw iRODS structs through the public API. The
-    /// per-flag helpers in `crate::operations` build the input locally and
-    /// expose typed wrappers.
-    ///
-    /// Still calls `rcGenQuery` directly — the cast to `*mut ffi::rcComm_t`
-    /// is the price for incremental migration. Commit 3 of Session 4.5
-    /// moves this through the shim and removes the cast.
+    /// `pub(crate)` because [`GenQuery`] is crate-internal; the
+    /// per-flag helpers in `crate::operations` build the query locally
+    /// and expose typed wrappers.
     pub(crate) fn query(
         &mut self,
-        inp: &mut ffi::genQueryInp_t,
+        q: &mut GenQuery,
     ) -> Result<Vec<Vec<String>>, BatonError> {
-        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut status: std::os::raw::c_int = 0;
+        let result = unsafe { ffi::shim_query_exec(self.conn, q.handle, &mut status) };
 
-        loop {
-            let mut out: *mut ffi::genQueryOut_t = std::ptr::null_mut();
-            let status = unsafe {
-                ffi::rcGenQuery(self.conn as *mut ffi::rcComm_t, inp, &mut out)
-            };
-
-            // A successful query that matched no rows returns
-            // CAT_NO_ROWS_FOUND (-808000). Report as empty, not an error.
-            //
-            // bindgen doesn't surface the constant from rodsClient.h's
-            // transitive includes — the symbol must live behind a header
-            // that wrapper.h doesn't reach. Hardcode the well-known value
-            // rather than expanding wrapper.h for one constant.
-            const CAT_NO_ROWS_FOUND: i32 = -808000;
-            if status == CAT_NO_ROWS_FOUND {
-                return Ok(rows);
-            }
-            if status < 0 {
-                return Err(BatonError::from_irods(status));
-            }
-            if out.is_null() {
-                return Err(BatonError {
-                    code: -1,
-                    message: "rcGenQuery returned null with non-negative status".to_string(),
-                });
-            }
-
-            // Read out all rows in this page. sqlResult[c].value is a flat
-            // buffer — row `r`'s value for column `c` lives at offset
-            // `r * sqlResult[c].len`, NUL-terminated within that slot.
-            let out_ref = unsafe { &*out };
-            for row_idx in 0..out_ref.rowCnt {
-                let mut row = Vec::with_capacity(out_ref.attriCnt as usize);
-                for col_idx in 0..out_ref.attriCnt {
-                    let sql = &out_ref.sqlResult[col_idx as usize];
-                    let offset = (row_idx * sql.len) as isize;
-                    let value_ptr = unsafe { sql.value.offset(offset) };
-                    let s = unsafe { CStr::from_ptr(value_ptr as *const _) }
-                        .to_string_lossy()
-                        .into_owned();
-                    row.push(s);
-                }
-                rows.push(row);
-            }
-
-            let continue_inx = out_ref.continueInx;
-            unsafe { ffi::freeGenQueryOut(&mut out) };
-
-            if continue_inx <= 0 {
-                break;
-            }
-            inp.continueInx = continue_inx;
+        if result.is_null() {
+            return Err(BatonError::from_irods(status));
         }
 
+        let n_rows = unsafe { ffi::shim_query_result_row_count(result) };
+        let n_cols = unsafe { ffi::shim_query_result_col_count(result) };
+
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(n_rows as usize);
+        for r in 0..n_rows {
+            let mut row = Vec::with_capacity(n_cols as usize);
+            for c in 0..n_cols {
+                let cell = unsafe { ffi::shim_query_result_get(result, r, c) };
+                // shim_query_result_get only returns NULL on
+                // out-of-range indices — we're inside the bounds we
+                // just read, so a NULL here would be a shim bug.
+                let s = if cell.is_null() {
+                    String::new()
+                } else {
+                    unsafe { CStr::from_ptr(cell) }
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                row.push(s);
+            }
+            rows.push(row);
+        }
+
+        unsafe { ffi::shim_query_result_free(result) };
         Ok(rows)
     }
 

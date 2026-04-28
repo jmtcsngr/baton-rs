@@ -55,27 +55,19 @@ fn main() {
         // Shim functions / types — the version-agnostic C surface from
         // `shim/ffi_shim.h`. Every subsystem migrated in Session 4.5
         // calls these instead of the raw iRODS API. The opaque
-        // `shim_rods_conn` forward declaration is allowlisted as a type
-        // so Rust can hold a `*mut ffi::shim_rods_conn` without bindgen
-        // ever seeing the underlying `rcComm_t` definition.
+        // `shim_rods_conn` / `shim_query` / `shim_query_result`
+        // forward declarations come through the type wildcard, so Rust
+        // holds `*mut ffi::shim_*` pointers without bindgen ever seeing
+        // the underlying iRODS struct definitions.
         .allowlist_function("shim_.*")
-        .allowlist_type("shim_env_t")
-        .allowlist_type("shim_stat_t")
-        .allowlist_type("shim_rods_conn")
+        .allowlist_type("shim_.*")
         // iRODS functions still called directly by not-yet-migrated
         // subsystems. Each batch moves behind the shim in subsequent
-        // commits (queries, metamod, error-name lookup), at which point
-        // its entry here goes away.
+        // commits (metamod, error-name lookup), at which point its
+        // entry here goes away.
         .allowlist_function("clientLogin")
         .allowlist_function("rErrMsg")
         .allowlist_function("rodsErrorName")
-        // General catalog query — every metadata flag (--avu / --acl /
-        // --replicate / --timestamp) goes through rcGenQuery.
-        .allowlist_function("rcGenQuery")
-        .allowlist_function("addInxIval")
-        .allowlist_function("addInxVal")
-        .allowlist_function("clearGenQueryInp")
-        .allowlist_function("freeGenQueryOut")
         // AVU add/remove — baton-metamod's only iRODS call. iRODS encodes
         // the operation via positional arg0..arg9 strings on the input
         // struct (arg0=operation, arg1=target-type-flag, arg2=path, etc.);
@@ -85,11 +77,6 @@ fn main() {
         .allowlist_type("rcComm_t")
         .allowlist_type("rErrMsg_t")
         .allowlist_type("modAVUMetadataInp_t")
-        .allowlist_type("genQueryInp_t")
-        .allowlist_type("genQueryOut_t")
-        .allowlist_type("sqlResult_t")
-        .allowlist_type("inxIvalPair_t")
-        .allowlist_type("inxValPair_t")
         // Error code constants used when translating iRODS codes into
         // BatonError. The allowlist is broad on purpose — constants are cheap.
         .allowlist_var("CAT_.*")

@@ -97,6 +97,66 @@ typedef struct {
 // the iRODS error code otherwise. `out` must be non-NULL.
 int shim_stat(shim_rods_conn_t *conn, const char *path, shim_stat_t *out);
 
+// ---- General query ----------------------------------------------------------
+//
+// Opaque builder + result types over `genQueryInp_t` / `genQueryOut_t`.
+// A `shim_query_t` is constructed, populated with SELECT and WHERE
+// terms, and then executed against a connection. The execution call
+// drains all pages internally and accumulates rows into a
+// `shim_query_result_t`, which the caller frees once it has read out
+// the strings it cares about.
+//
+// `CAT_NO_ROWS_FOUND` is treated as a normal empty result — callers
+// see a zero-row result with `*status_out == 0` rather than a negative
+// status. Any other iRODS error returns NULL with the iRODS code in
+// `*status_out`.
+
+typedef struct shim_query        shim_query_t;
+typedef struct shim_query_result shim_query_result_t;
+
+// Allocate a fresh query builder. Returns NULL on out-of-memory.
+shim_query_t *shim_query_new(void);
+
+// Release a query builder and the underlying iRODS state
+// (`clearGenQueryInp`). Safe to call with NULL.
+void shim_query_free(shim_query_t *q);
+
+// Append a column index to the SELECT list. Wraps `addInxIval`.
+void shim_query_add_select(shim_query_t *q, int col);
+
+// Append a WHERE condition for `col`. `condition` is the iRODS
+// genQuery condition string (e.g. `"= 'foo'"` or `"like 'bar%'"`) and
+// must be NUL-terminated; the shim copies it via `addInxVal`'s strdup.
+// Returns 0 on success.
+int shim_query_add_where(shim_query_t *q, int col, const char *condition);
+
+// Run `q` to completion against `conn`, paging until the catalog
+// stops returning more rows. Returns a non-NULL result handle on
+// success (possibly with zero rows) and writes 0 to `*status_out`. On
+// iRODS error, returns NULL and writes the iRODS error code to
+// `*status_out`. `q` may be reused or freed after this returns.
+shim_query_result_t *shim_query_exec(
+    shim_rods_conn_t *conn,
+    shim_query_t     *q,
+    int              *status_out);
+
+// Number of rows in the result.
+int shim_query_result_row_count(const shim_query_result_t *r);
+
+// Number of columns per row (== length of the original SELECT list).
+int shim_query_result_col_count(const shim_query_result_t *r);
+
+// Read a single cell. Returns a pointer to a NUL-terminated string
+// owned by `r` — valid until `shim_query_result_free`. Returns NULL
+// for out-of-range indices.
+const char *shim_query_result_get(
+    const shim_query_result_t *r,
+    int row,
+    int col);
+
+// Release the result and all strings it owns. Safe to call with NULL.
+void shim_query_result_free(shim_query_result_t *r);
+
 #ifdef __cplusplus
 }
 #endif

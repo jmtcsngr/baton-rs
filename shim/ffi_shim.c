@@ -123,3 +123,195 @@ int shim_stat(shim_rods_conn_t *conn, const char *path, shim_stat_t *out) {
     freeRodsObjStat(stat);
     return 0;
 }
+
+// --- General query -----------------------------------------------------------
+
+// Internal storage for the opaque `shim_query_t`. We embed the iRODS
+// `genQueryInp_t` directly so `addInxIval` / `addInxVal` operate on the
+// real struct; the opaque wrapper just keeps that detail off the
+// bindgen-visible surface.
+struct shim_query {
+    genQueryInp_t inp;
+};
+
+// Internal storage for `shim_query_result_t`. Strings are heap-copied
+// in row-major order so the caller doesn't have to keep iRODS's flat
+// `genQueryOut_t` buffers alive.
+struct shim_query_result {
+    int    n_rows;
+    int    n_cols;
+    char **values;  // n_rows * n_cols, row-major; each entry is a
+                    // strdup'd NUL-terminated string (NULL for missing).
+};
+
+shim_query_t *shim_query_new(void) {
+    shim_query_t *q = calloc(1, sizeof(*q));
+    if (!q) return NULL;
+    // genQueryInp_t fields all initialise to zero, which is what
+    // `addInxIval` / `addInxVal` expect on first call. maxRows controls
+    // the per-page batch size iRODS returns; 500 mirrors what baton-rs
+    // used pre-shim (matches upstream baton's choice — picks up most
+    // realistic per-object metadata sets in one round trip).
+    q->inp.maxRows = 500;
+    return q;
+}
+
+void shim_query_free(shim_query_t *q) {
+    if (!q) return;
+    clearGenQueryInp(&q->inp);
+    free(q);
+}
+
+void shim_query_add_select(shim_query_t *q, int col) {
+    if (!q) return;
+    addInxIval(&q->inp.selectInp, col, 0);
+}
+
+int shim_query_add_where(shim_query_t *q, int col, const char *condition) {
+    if (!q || !condition) return -1;
+    // addInxVal strdup's the condition string internally, so the
+    // caller's buffer can be freed immediately after.
+    addInxVal(&q->inp.sqlCondInp, col, (char *)condition);
+    return 0;
+}
+
+// CAT_NO_ROWS_FOUND lives in `irods/rcMisc.h` (or moved between
+// versions); -808000 is the wire-stable value across 4.2 and 4.3.
+// Hardcoded here for the same reason it's hardcoded on the Rust side
+// in earlier commits — a single constant isn't worth dragging another
+// header into bindgen's reach.
+#define SHIM_CAT_NO_ROWS_FOUND (-808000)
+
+// Free the in-progress accumulator on the error path. `filled` is the
+// count of strdup'd entries written so far; slots `[filled, capacity)`
+// are uninitialised (post-`realloc`) and must not be touched.
+static void free_in_progress(char **values, int filled,
+                             shim_query_result_t *result) {
+    if (values) {
+        for (int i = 0; i < filled; i++) free(values[i]);
+        free(values);
+    }
+    free(result);
+}
+
+shim_query_result_t *shim_query_exec(
+    shim_rods_conn_t *conn,
+    shim_query_t     *q,
+    int              *status_out)
+{
+    if (status_out) *status_out = 0;
+    if (!conn || !q) {
+        if (status_out) *status_out = -1;
+        return NULL;
+    }
+
+    shim_query_result_t *result = calloc(1, sizeof(*result));
+    if (!result) {
+        if (status_out) *status_out = -1;
+        return NULL;
+    }
+
+    // Page through all results, accumulating row data into a flat
+    // `values` array (row-major). We can't size it up front because
+    // pagination drives the total — grow geometrically so the realloc
+    // cost stays amortised.
+    int     capacity = 0;
+    int     filled   = 0;
+    char  **values   = NULL;
+    int     n_cols   = 0;
+
+    while (1) {
+        genQueryOut_t *out = NULL;
+        int status = rcGenQuery((rcComm_t *)conn, &q->inp, &out);
+
+        if (status == SHIM_CAT_NO_ROWS_FOUND) {
+            // Empty page on first iteration ⇒ zero-row result; on a
+            // later iteration this just means we've drained the pages.
+            break;
+        }
+        if (status < 0) {
+            if (status_out) *status_out = status;
+            free_in_progress(values, filled, result);
+            return NULL;
+        }
+        if (!out) {
+            if (status_out) *status_out = -1;
+            free_in_progress(values, filled, result);
+            return NULL;
+        }
+
+        if (n_cols == 0) {
+            n_cols = out->attriCnt;
+        }
+
+        int new_total = filled + (out->rowCnt * n_cols);
+        if (new_total > capacity) {
+            int new_cap = capacity == 0 ? new_total : capacity;
+            while (new_cap < new_total) new_cap *= 2;
+            char **regrown = realloc(values, new_cap * sizeof(*values));
+            if (!regrown) {
+                if (status_out) *status_out = -1;
+                freeGenQueryOut(&out);
+                free_in_progress(values, filled, result);
+                return NULL;
+            }
+            values = regrown;
+            capacity = new_cap;
+        }
+
+        for (int row_idx = 0; row_idx < out->rowCnt; row_idx++) {
+            for (int col_idx = 0; col_idx < n_cols; col_idx++) {
+                sqlResult_t *sql = &out->sqlResult[col_idx];
+                const char *cell = sql->value + (row_idx * sql->len);
+                char *copy = strdup(cell);
+                if (!copy) {
+                    if (status_out) *status_out = -1;
+                    freeGenQueryOut(&out);
+                    free_in_progress(values, filled, result);
+                    return NULL;
+                }
+                values[filled++] = copy;
+            }
+        }
+
+        int continue_inx = out->continueInx;
+        freeGenQueryOut(&out);
+
+        if (continue_inx <= 0) break;
+        q->inp.continueInx = continue_inx;
+    }
+
+    // n_cols stays 0 on the empty-result path; that's fine — Rust
+    // checks row_count first.
+    result->n_rows = (n_cols > 0) ? (filled / n_cols) : 0;
+    result->n_cols = n_cols;
+    result->values = values;
+    return result;
+}
+
+int shim_query_result_row_count(const shim_query_result_t *r) {
+    return r ? r->n_rows : 0;
+}
+
+int shim_query_result_col_count(const shim_query_result_t *r) {
+    return r ? r->n_cols : 0;
+}
+
+const char *shim_query_result_get(const shim_query_result_t *r, int row, int col) {
+    if (!r || !r->values) return NULL;
+    if (row < 0 || row >= r->n_rows) return NULL;
+    if (col < 0 || col >= r->n_cols) return NULL;
+    return r->values[(row * r->n_cols) + col];
+}
+
+void shim_query_result_free(shim_query_result_t *r) {
+    if (!r) return;
+    if (r->values) {
+        int total = r->n_rows * r->n_cols;
+        for (int i = 0; i < total; i++) {
+            free(r->values[i]);
+        }
+        free(r->values);
+    }
+    free(r);
+}
