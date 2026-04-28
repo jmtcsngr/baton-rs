@@ -52,6 +52,15 @@ fn user_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `imkdir -p <remote>`: create a collection (idempotent).
+fn imkdir(remote: &str) {
+    let status = Command::new("imkdir")
+        .args(["-p", remote])
+        .status()
+        .expect("failed to spawn imkdir");
+    assert!(status.success(), "imkdir {} failed", remote);
+}
+
 fn imeta_add(kind_flag: &str, path: &str, attr: &str, value: &str, units: Option<&str>) {
     let mut args: Vec<String> = vec![
         "add".to_string(),
@@ -484,4 +493,311 @@ fn metaquery_empty_input_returns_empty_results() {
     let results = metaquery(&mut conn, &input, &MetaqueryFlags::default())
         .expect("metaquery on empty input");
     assert!(results.is_empty(), "expected no results, got {:?}", results);
+}
+
+#[test]
+fn metaquery_avu_units_filter_narrows_results() {
+    // Two data objects with the same (attribute, value) pair, but only
+    // one carries `units`. A query that specifies units should
+    // narrow to the unit-carrying object.
+    let local = "/tmp/baton_rs_metaquery_units";
+    std::fs::write(local, b"units").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let do_with_units = "baton_rs_metaquery_units_with";
+    let do_no_units = "baton_rs_metaquery_units_without";
+    let r_with = format!("{}/{}", remote_coll, do_with_units);
+    let r_no = format!("{}/{}", remote_coll, do_no_units);
+    iput(local, &r_with);
+    iput(local, &r_no);
+    let _c1 = IrodsCleanup(r_with.clone());
+    let _c2 = IrodsCleanup(r_no.clone());
+
+    imeta_add("-d", &r_with, "baton_rs_metaquery_units_attr", "v", Some("target_unit"));
+    imeta_add("-d", &r_no, "baton_rs_metaquery_units_attr", "v", None);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_metaquery_units_attr".to_string(),
+            value: "v".to_string(),
+            units: Some("target_unit".to_string()),
+            operator: Operator::Equals,
+        }],
+        ..Default::default()
+    };
+
+    let results = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery");
+
+    let in_results = |name: &str| {
+        results.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == name
+        ))
+    };
+    assert!(
+        in_results(do_with_units),
+        "object with target_unit should be in results, got {:?}",
+        results
+    );
+    assert!(
+        !in_results(do_no_units),
+        "object without units should be excluded by units filter, got {:?}",
+        results
+    );
+}
+
+#[test]
+fn metaquery_collection_scope_filters_by_subtree() {
+    // Two sub-collections under home, each containing a data object
+    // with the same AVU. A query scoped to one sub-collection should
+    // return only that sub-collection's data object.
+    let scoped_coll = "/testZone/home/irods/baton_rs_scope_in";
+    let other_coll = "/testZone/home/irods/baton_rs_scope_other";
+    let _c1 = IrodsCleanup(scoped_coll.to_string());
+    let _c2 = IrodsCleanup(other_coll.to_string());
+    imkdir(scoped_coll);
+    imkdir(other_coll);
+
+    let local = "/tmp/baton_rs_scope_test";
+    std::fs::write(local, b"scope").expect("write");
+    let r_in = format!("{}/scoped_obj", scoped_coll);
+    let r_other = format!("{}/other_obj", other_coll);
+    iput(local, &r_in);
+    iput(local, &r_other);
+    imeta_add("-d", &r_in, "baton_rs_scope_attr", "v", None);
+    imeta_add("-d", &r_other, "baton_rs_scope_attr", "v", None);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_scope_attr".to_string(),
+            value: "v".to_string(),
+            units: None,
+            operator: Operator::Equals,
+        }],
+        collection: Some(scoped_coll.to_string()),
+        ..Default::default()
+    };
+
+    let results = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery");
+
+    assert!(
+        results.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == scoped_coll && d.data_object == "scoped_obj"
+        )),
+        "scoped object should be in results, got {:?}",
+        results
+    );
+    assert!(
+        !results.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == other_coll && d.data_object == "other_obj"
+        )),
+        "object outside the scope should be excluded, got {:?}",
+        results
+    );
+}
+
+#[test]
+fn metaquery_collections_only_flag_excludes_data_objects() {
+    // Stage one collection and one data object, both with the same
+    // unique AVU. Run metaquery with include_data_objects = false; the
+    // collection should be in results, the data object should not.
+    let coll = "/testZone/home/irods/baton_rs_coll_only";
+    let _c_coll = IrodsCleanup(coll.to_string());
+    imkdir(coll);
+    imeta_add("-C", coll, "baton_rs_coll_only_attr", "v", None);
+
+    let local = "/tmp/baton_rs_coll_only_data";
+    std::fs::write(local, b"coll-only").expect("write");
+    let r_data = "/testZone/home/irods/baton_rs_coll_only_data".to_string();
+    iput(local, &r_data);
+    let _c_data = IrodsCleanup(r_data.clone());
+    imeta_add("-d", &r_data, "baton_rs_coll_only_attr", "v", None);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_coll_only_attr".to_string(),
+            value: "v".to_string(),
+            units: None,
+            operator: Operator::Equals,
+        }],
+        ..Default::default()
+    };
+
+    let results = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: false,
+            include_collections: true,
+        },
+    )
+    .expect("metaquery");
+
+    assert!(
+        results.iter().any(|t| matches!(
+            t,
+            Target::Collection(c) if c.collection == coll
+        )),
+        "collection should be in results, got {:?}",
+        results
+    );
+    assert!(
+        !results.iter().any(|t| matches!(t, Target::DataObject(_))),
+        "data objects should be excluded by include_data_objects=false, got {:?}",
+        results
+    );
+}
+
+#[test]
+fn metaquery_not_like_operator_excludes_pattern_matches() {
+    // Two data objects sharing one attribute but with different values.
+    // A `not like` query should exclude the value matching the pattern
+    // and include the one that doesn't.
+    let local = "/tmp/baton_rs_notlike";
+    std::fs::write(local, b"notlike").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let do_match = "baton_rs_notlike_match";
+    let do_other = "baton_rs_notlike_other";
+    let r_match = format!("{}/{}", remote_coll, do_match);
+    let r_other = format!("{}/{}", remote_coll, do_other);
+    iput(local, &r_match);
+    iput(local, &r_other);
+    let _c1 = IrodsCleanup(r_match.clone());
+    let _c2 = IrodsCleanup(r_other.clone());
+
+    imeta_add("-d", &r_match, "baton_rs_notlike_attr", "match_value", None);
+    imeta_add("-d", &r_other, "baton_rs_notlike_attr", "other_value", None);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // attr = baton_rs_notlike_attr AND value not like 'match%'
+    let input = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_notlike_attr".to_string(),
+            value: "match%".to_string(),
+            units: None,
+            operator: Operator::NotLike,
+        }],
+        ..Default::default()
+    };
+
+    let results = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery");
+
+    let in_results = |name: &str| {
+        results.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == name
+        ))
+    };
+    assert!(
+        !in_results(do_match),
+        "value matching `match%` should be excluded by `not like`, got {:?}",
+        results
+    );
+    assert!(
+        in_results(do_other),
+        "value not matching `match%` should be included, got {:?}",
+        results
+    );
+}
+
+#[test]
+fn metaquery_numeric_greater_than_operator_filters_numerically() {
+    // Two AVU values: "5" and "100". Threshold "50".
+    //   Lex: "5" > "50" is false (shorter prefix), "100" > "50" is
+    //        false ('1' < '5'). Both excluded.
+    //   Num (n>): 5 > 50 false (excluded), 100 > 50 true (included).
+    // Using `n>` should include only the "100" object.
+    let local = "/tmp/baton_rs_numeric";
+    std::fs::write(local, b"numeric").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let do_low = "baton_rs_numeric_low";
+    let do_high = "baton_rs_numeric_high";
+    let r_low = format!("{}/{}", remote_coll, do_low);
+    let r_high = format!("{}/{}", remote_coll, do_high);
+    iput(local, &r_low);
+    iput(local, &r_high);
+    let _c1 = IrodsCleanup(r_low.clone());
+    let _c2 = IrodsCleanup(r_high.clone());
+
+    imeta_add("-d", &r_low, "baton_rs_numeric_attr", "5", None);
+    imeta_add("-d", &r_high, "baton_rs_numeric_attr", "100", None);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_numeric_attr".to_string(),
+            value: "50".to_string(),
+            units: None,
+            operator: Operator::NumericGreaterThan,
+        }],
+        ..Default::default()
+    };
+
+    let results = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery");
+
+    let in_results = |name: &str| {
+        results.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == name
+        ))
+    };
+    assert!(
+        in_results(do_high),
+        "100 n> 50 should be true, expected high object in results, got {:?}",
+        results
+    );
+    assert!(
+        !in_results(do_low),
+        "5 n> 50 should be false, low object should be excluded, got {:?}",
+        results
+    );
 }
