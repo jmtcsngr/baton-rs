@@ -62,6 +62,12 @@ fn main() {
         .allowlist_function("shim_.*")
         .allowlist_type("shim_.*")
         .allowlist_var("SHIM_.*")
+        // Emit `typedef enum { ... } shim_col_t;` variants as flat
+        // top-level constants (`SHIM_COL_FOO`) rather than the
+        // bindgen-default prefixed form (`shim_col_t_SHIM_COL_FOO`).
+        // The shim's enum names are already verbose enough; the extra
+        // typedef prefix is just noise at the call site.
+        .prepend_enum_name(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("bindgen: failed to generate shim bindings");
