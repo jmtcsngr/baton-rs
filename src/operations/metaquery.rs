@@ -5,27 +5,27 @@
 //! match an [`AvuQuery`] / [`TimestampQuery`] / [`AccessQuery`] filter
 //! and return the matching paths as [`Target`] values.
 //!
-//! Session 4c builds this incrementally:
+//! Capabilities, in the order they were built up across Session 4c:
 //!
-//! - commit 2: single-AVU search across data objects and collections,
+//! - **Single-AVU search** across data objects and collections,
 //!   scoped to a parent `collection` if provided.
-//! - commit 4: timestamp range queries — `created` / `modified`
-//!   filters on each result, applied as additional WHERE conditions
-//!   alongside any AVU criteria.
-//! - **commit 5 (this commit):** ACL selectors — filter by an
-//!   `(owner, level [, zone])` triple via the catalog's user-access
-//!   join. Data objects and collections use different join columns
-//!   (`COL_USER_*` vs `COL_COLL_USER_*`), same split that bit us in
-//!   Session 3b's `--acl` work.
-//! - **commit 6 (this commit):** multi-AVU criteria via per-AVU
-//!   subqueries + result intersection. iRODS's `rcGenQuery` doesn't
-//!   naturally express metadata self-joins — chaining multiple WHERE
-//!   conditions on `COL_META_*_ATTR_NAME` / `COL_META_*_ATTR_VALUE` in
-//!   one query asks the parser for a single AVU row that matches every
-//!   pair simultaneously, which is impossible (a row has one attribute
-//!   name). The fix: run one subquery per AVU, intersect the resulting
-//!   path sets. Other criteria (timestamps, access, scope) ride along
-//!   on every subquery.
+//! - **Timestamp range queries** — `created` / `modified` filters
+//!   applied as additional WHERE conditions alongside any AVU
+//!   criteria.
+//! - **ACL selectors** — filter by an `(owner, level [, zone])`
+//!   triple via the catalog's user-access join. Data objects and
+//!   collections use different join columns (`COL_USER_*` vs
+//!   `COL_COLL_USER_*`), same split that bit us in Session 3b's
+//!   `--acl` work.
+//! - **Multi-AVU criteria** via per-AVU subqueries + result
+//!   intersection. iRODS's `rcGenQuery` doesn't naturally express
+//!   metadata self-joins — chaining multiple WHERE conditions on
+//!   `COL_META_*_ATTR_NAME` / `COL_META_*_ATTR_VALUE` in one query
+//!   asks the parser for a single AVU row that matches every pair
+//!   simultaneously, which is impossible (a row has one attribute
+//!   name). The fix: run one subquery per AVU, intersect the
+//!   resulting path sets. Other criteria (timestamps, access, scope)
+//!   ride along on every subquery.
 
 use std::collections::HashSet;
 
