@@ -157,6 +157,31 @@ const char *shim_query_result_get(
 // Release the result and all strings it owns. Safe to call with NULL.
 void shim_query_result_free(shim_query_result_t *r);
 
+// ---- AVU modify -------------------------------------------------------------
+//
+// `rcModAVUMetadata` uses a stringly-typed positional input
+// (`modAVUMetadataInp_t.arg0..arg9`) where arg0 is the operation,
+// arg1 is the target-type flag, arg2 is the path, and arg3..arg5 are
+// the AVU attribute / value / units. The shim takes those as named
+// arguments and builds the input struct internally so callers never
+// see the iRODS struct shape.
+//
+// `units` may be NULL for AVUs that have no units. iRODS does not
+// retain the strings past return, so the shim's caller is free to
+// drop / reuse the buffers after `shim_mod_avu` returns.
+
+// Add or remove a single AVU on a data object or collection.
+// `operation` is "add" or "rm"; `target_type` is "-d" (data object) or
+// "-C" (collection). Returns 0 on success, or the iRODS error code.
+int shim_mod_avu(
+    shim_rods_conn_t *conn,
+    const char       *operation,
+    const char       *target_type,
+    const char       *path,
+    const char       *attribute,
+    const char       *value,
+    const char       *units);
+
 #ifdef __cplusplus
 }
 #endif

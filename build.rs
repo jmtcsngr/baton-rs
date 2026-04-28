@@ -62,21 +62,14 @@ fn main() {
         .allowlist_function("shim_.*")
         .allowlist_type("shim_.*")
         // iRODS functions still called directly by not-yet-migrated
-        // subsystems. Each batch moves behind the shim in subsequent
-        // commits (metamod, error-name lookup), at which point its
-        // entry here goes away.
+        // subsystems. Error-name lookup is the only one left after
+        // commit 4 of Session 4.5; it moves behind the shim in commit 5.
         .allowlist_function("clientLogin")
         .allowlist_function("rErrMsg")
         .allowlist_function("rodsErrorName")
-        // AVU add/remove — baton-metamod's only iRODS call. iRODS encodes
-        // the operation via positional arg0..arg9 strings on the input
-        // struct (arg0=operation, arg1=target-type-flag, arg2=path, etc.);
-        // the safe wrapper hides that stringly-typed shape.
-        .allowlist_function("rcModAVUMetadata")
         // Types referenced by the iRODS functions still called directly.
         .allowlist_type("rcComm_t")
         .allowlist_type("rErrMsg_t")
-        .allowlist_type("modAVUMetadataInp_t")
         // Error code constants used when translating iRODS codes into
         // BatonError. The allowlist is broad on purpose — constants are cheap.
         .allowlist_var("CAT_.*")

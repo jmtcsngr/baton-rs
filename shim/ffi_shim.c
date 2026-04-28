@@ -315,3 +315,37 @@ void shim_query_result_free(shim_query_result_t *r) {
     }
     free(r);
 }
+
+// --- AVU modify --------------------------------------------------------------
+
+int shim_mod_avu(
+    shim_rods_conn_t *conn,
+    const char       *operation,
+    const char       *target_type,
+    const char       *path,
+    const char       *attribute,
+    const char       *value,
+    const char       *units)
+{
+    if (!conn || !operation || !target_type || !path || !attribute || !value) {
+        return -1;
+    }
+
+    modAVUMetadataInp_t inp;
+    memset(&inp, 0, sizeof(inp));
+
+    // iRODS uses non-const char* throughout this struct for legacy
+    // reasons; rcModAVUMetadata reads the strings only and does not
+    // retain them past return, so casting away const is safe.
+    inp.arg0 = (char *)operation;
+    inp.arg1 = (char *)target_type;
+    inp.arg2 = (char *)path;
+    inp.arg3 = (char *)attribute;
+    inp.arg4 = (char *)value;
+    if (units) {
+        inp.arg5 = (char *)units;
+    }
+    // arg6..arg9 stay NULL from the memset above.
+
+    return rcModAVUMetadata((rcComm_t *)conn, &inp);
+}

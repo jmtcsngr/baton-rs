@@ -246,23 +246,16 @@ impl RodsConnection {
 
     /// Add or remove a single AVU on a data object or collection.
     ///
-    /// Wraps `rcModAVUMetadata`, which uses a stringly-typed
-    /// `modAVUMetadataInp_t.arg0..arg9` layout:
-    ///   arg0 = operation ("add" / "rm")
-    ///   arg1 = target-type flag ("-d" data object, "-C" collection)
-    ///   arg2 = absolute iRODS path
-    ///   arg3 = AVU attribute
-    ///   arg4 = AVU value
-    ///   arg5 = AVU units (NULL when the AVU has no units)
-    ///   arg6..arg9 unused for this entry point
+    /// Wraps `shim_mod_avu`, which builds the iRODS
+    /// `modAVUMetadataInp_t` (arg0..arg9 stringly-typed positional
+    /// layout) and calls `rcModAVUMetadata` internally. Rust just
+    /// hands over the named pieces:
+    ///   - operation: "add" or "rm"
+    ///   - target type: "-d" (data object) or "-C" (collection)
+    ///   - path / attribute / value / optional units
     ///
-    /// All `CString` allocations live for the `rcModAVUMetadata` call
-    /// only — iRODS does not retain pointers past return, so the
-    /// stack-local strings can be dropped immediately after.
-    ///
-    /// Still calls `rcModAVUMetadata` directly — the cast to
-    /// `*mut ffi::rcComm_t` is temporary; commit 4 of Session 4.5
-    /// moves this through the shim.
+    /// `CString` allocations live only for the call — iRODS does not
+    /// retain the pointers past return.
     pub fn mod_avu(
         &mut self,
         operation: MetamodOperation,
@@ -271,33 +264,32 @@ impl RodsConnection {
     ) -> Result<(), BatonError> {
         // Operation + target-type flag are constants, so CString::new
         // can never fail on them; unwrap is appropriate.
-        let arg0 = CString::new(match operation {
+        let op_c = CString::new(match operation {
             MetamodOperation::Add => "add",
             MetamodOperation::Rm => "rm",
         })
         .unwrap();
-        let arg1 = CString::new(match target {
+        let tt_c = CString::new(match target {
             Target::DataObject(_) => "-d",
             Target::Collection(_) => "-C",
         })
         .unwrap();
 
-        // The remaining args come from caller-supplied strings, so a
-        // NUL byte anywhere is a programmer/input error we surface as
-        // a clean BatonError rather than a panic.
-        let arg2 = CString::new(target.path()).map_err(|_| BatonError {
+        // Caller-supplied strings — interior NUL is a programmer/input
+        // error we surface as a clean BatonError rather than a panic.
+        let path_c = CString::new(target.path()).map_err(|_| BatonError {
             code: -1,
             message: "path contains interior NUL".to_string(),
         })?;
-        let arg3 = CString::new(avu.attribute.as_str()).map_err(|_| BatonError {
+        let attr_c = CString::new(avu.attribute.as_str()).map_err(|_| BatonError {
             code: -1,
             message: "AVU attribute contains interior NUL".to_string(),
         })?;
-        let arg4 = CString::new(avu.value.as_str()).map_err(|_| BatonError {
+        let value_c = CString::new(avu.value.as_str()).map_err(|_| BatonError {
             code: -1,
             message: "AVU value contains interior NUL".to_string(),
         })?;
-        let arg5 = avu
+        let units_c = avu
             .units
             .as_ref()
             .map(|u| CString::new(u.as_str()))
@@ -306,25 +298,21 @@ impl RodsConnection {
                 code: -1,
                 message: "AVU units contains interior NUL".to_string(),
             })?;
-
-        let mut inp = MaybeUninit::<ffi::modAVUMetadataInp_t>::zeroed();
-        let inp_ref = unsafe { inp.assume_init_mut() };
-        inp_ref.arg0 = arg0.as_ptr() as *mut _;
-        inp_ref.arg1 = arg1.as_ptr() as *mut _;
-        inp_ref.arg2 = arg2.as_ptr() as *mut _;
-        inp_ref.arg3 = arg3.as_ptr() as *mut _;
-        inp_ref.arg4 = arg4.as_ptr() as *mut _;
-        if let Some(u) = arg5.as_ref() {
-            inp_ref.arg5 = u.as_ptr() as *mut _;
-        }
-        // arg6..arg9 stay null from the zeroed initialiser.
+        let units_ptr = units_c
+            .as_ref()
+            .map_or(std::ptr::null(), |c| c.as_ptr());
 
         let status = unsafe {
-            ffi::rcModAVUMetadata(self.conn as *mut ffi::rcComm_t, inp_ref)
+            ffi::shim_mod_avu(
+                self.conn,
+                op_c.as_ptr(),
+                tt_c.as_ptr(),
+                path_c.as_ptr(),
+                attr_c.as_ptr(),
+                value_c.as_ptr(),
+                units_ptr,
+            )
         };
-
-        // CStrings drop here; the dangling pointers in `inp` are
-        // harmless because rcModAVUMetadata has already returned.
 
         if status != 0 {
             return Err(BatonError::from_irods(status));
