@@ -8,11 +8,10 @@
 //! This module exposes `RodsConnection`, a RAII handle over an opaque
 //! `shim_rods_conn_t *` (internally a `rcComm_t *`, hidden inside the C
 //! shim — see `shim/ffi_shim.{c,h}` and issue #9 for the rationale).
-//! Constructing one calls `shim_open` (`rcConnect`); dropping one calls
-//! `shim_close` (`rcDisconnect`). Operations that haven't migrated to
-//! the shim yet (queries, metamod) cast back to `*mut ffi::rcComm_t`
-//! at the call site; later commits in Session 4.5 push them through
-//! the shim too.
+//! Constructing one calls `shim_open` (`rcConnect`); dropping one
+//! calls `shim_close` (`rcDisconnect`). Every iRODS API in use by
+//! baton-rs (auth, stat, queries, metamod, error-name lookup) lands
+//! through the shim — Rust has no `rcComm_t *` cast site any longer.
 //!
 //! Connections are single-threaded by default: the underlying iRODS
 //! handle is not safe to share across threads, and the raw-pointer

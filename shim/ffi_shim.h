@@ -182,6 +182,15 @@ int shim_mod_avu(
     const char       *value,
     const char       *units);
 
+// ---- Error names ------------------------------------------------------------
+
+// Resolve an iRODS status code to its symbolic name (e.g.
+// `"CAT_NO_ROWS_FOUND"` for -808000) via `rodsErrorName`. Returns a
+// pointer to a static string owned by the iRODS runtime — valid for
+// the lifetime of the process and must not be freed by the caller.
+// Returns NULL when iRODS doesn't recognise the code.
+const char *shim_error_name(int code);
+
 #ifdef __cplusplus
 }
 #endif

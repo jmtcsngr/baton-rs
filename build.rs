@@ -61,15 +61,13 @@ fn main() {
         // the underlying iRODS struct definitions.
         .allowlist_function("shim_.*")
         .allowlist_type("shim_.*")
-        // iRODS functions still called directly by not-yet-migrated
-        // subsystems. Error-name lookup is the only one left after
-        // commit 4 of Session 4.5; it moves behind the shim in commit 5.
-        .allowlist_function("clientLogin")
-        .allowlist_function("rErrMsg")
-        .allowlist_function("rodsErrorName")
-        // Types referenced by the iRODS functions still called directly.
-        .allowlist_type("rcComm_t")
-        .allowlist_type("rErrMsg_t")
+        // No iRODS functions or structs are called from Rust any
+        // longer — every subsystem (connection, queries, metamod,
+        // error-name lookup) goes through `shim/ffi_shim.{c,h}`.
+        // Commit 6 of Session 4.5 takes the next step: removing
+        // `<rodsClient.h>` from `wrapper.h` so libclang no longer has
+        // to parse the iRODS headers at all, and flipping iRODS 4.2.7
+        // back from `experimental: true` in CI.
         // Error code constants used when translating iRODS codes into
         // BatonError. The allowlist is broad on purpose — constants are cheap.
         .allowlist_var("CAT_.*")

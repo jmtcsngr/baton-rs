@@ -349,3 +349,12 @@ int shim_mod_avu(
 
     return rcModAVUMetadata((rcComm_t *)conn, &inp);
 }
+
+// --- Error names -------------------------------------------------------------
+
+const char *shim_error_name(int code) {
+    // The second arg is an optional sub-error name; baton-rs does not
+    // distinguish sub-errors from primary errors at the JSON layer, so
+    // we always pass NULL.
+    return rodsErrorName(code, NULL);
+}
