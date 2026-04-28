@@ -16,7 +16,7 @@
 //!
 //! When `shim/ffi_shim.h` changes, update the declarations here to
 //! match. The set is small (POD structs, opaque forward decls, an
-//! enum, ~15 functions), so divergence is easy to spot.
+//! enum, 17 functions), so divergence is easy to spot.
 //!
 //! Not part of the public crate API. All consumers go through the
 //! safe wrappers in `crate::connection` and friends.
@@ -30,10 +30,9 @@ use std::os::raw::{c_char, c_int, c_longlong, c_uint};
 
 // ---- Connection lifecycle ---------------------------------------------------
 
-/// Opaque connection handle. Bindgen-style: a forward-declared zero-
-/// sized struct that Rust can hold a `*mut` to without ever needing
-/// the underlying definition. Internally a `rcComm_t *` cast inside
-/// the shim.
+/// Opaque connection handle: a forward-declared zero-sized struct
+/// that Rust can hold a `*mut` to without ever needing the underlying
+/// definition. Internally a `rcComm_t *` cast inside the shim.
 #[repr(C)]
 pub struct shim_rods_conn {
     _unused: [u8; 0],

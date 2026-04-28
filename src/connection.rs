@@ -330,9 +330,9 @@ impl RodsConnection {
     /// place, re-authenticating via [`Self::login_from_auth_file`].
     ///
     /// Use this after an idle period or a transient network failure.
-    /// Session 3+ will drive it from the `--connect-time` CLI flag;
-    /// here it's a manually-invoked helper that forms the building
-    /// block for that.
+    /// A future session will drive it from a `--connect-time` CLI
+    /// flag; for now it's a manually-invoked helper that forms the
+    /// building block for that.
     ///
     /// On failure the connection pointer is left null (from the
     /// disconnect step), so it's always safe to drop the

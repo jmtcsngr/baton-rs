@@ -127,9 +127,9 @@ int shim_stat(shim_rods_conn_t *conn, const char *path, shim_stat_t *out) {
 // --- General query -----------------------------------------------------------
 
 // Internal storage for the opaque `shim_query_t`. We embed the iRODS
-// `genQueryInp_t` directly so `addInxIval` / `addInxVal` operate on the
-// real struct; the opaque wrapper just keeps that detail off the
-// bindgen-visible surface.
+// `genQueryInp_t` directly so `addInxIval` / `addInxVal` operate on
+// the real struct; the opaque wrapper keeps that detail off the
+// shim's public surface, which is what Rust mirrors in `src/ffi.rs`.
 struct shim_query {
     genQueryInp_t inp;
 };
@@ -214,11 +214,10 @@ int shim_query_add_where(shim_query_t *q, shim_col_t col, const char *condition)
     return 0;
 }
 
-// CAT_NO_ROWS_FOUND lives in `irods/rcMisc.h` (or moved between
+// CAT_NO_ROWS_FOUND lives in `irods/rcMisc.h` (or has moved between
 // versions); -808000 is the wire-stable value across 4.2 and 4.3.
-// Hardcoded here for the same reason it's hardcoded on the Rust side
-// in earlier commits — a single constant isn't worth dragging another
-// header into bindgen's reach.
+// Hardcoded here so the shim doesn't depend on whichever iRODS header
+// happens to expose the macro this release.
 #define SHIM_CAT_NO_ROWS_FOUND (-808000)
 
 // Free the in-progress accumulator on the error path. `filled` is the
