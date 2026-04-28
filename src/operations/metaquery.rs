@@ -9,10 +9,14 @@
 //!
 //! - commit 2: single-AVU search across data objects and collections,
 //!   scoped to a parent `collection` if provided.
-//! - **commit 4 (this commit):** timestamp range queries — `created`
-//!   / `modified` filters on each result, applied as additional WHERE
-//!   conditions alongside any AVU criteria.
-//! - commit 5: ACL selectors.
+//! - commit 4: timestamp range queries — `created` / `modified`
+//!   filters on each result, applied as additional WHERE conditions
+//!   alongside any AVU criteria.
+//! - **commit 5 (this commit):** ACL selectors — filter by an
+//!   `(owner, level [, zone])` triple via the catalog's user-access
+//!   join. Data objects and collections use different join columns
+//!   (`COL_USER_*` vs `COL_COLL_USER_*`), same split that bit us in
+//!   Session 3b's `--acl` work.
 //! - commit 6: multi-AVU criteria via per-AVU subqueries + result
 //!   intersection (iRODS's `rcGenQuery` doesn't naturally express
 //!   metadata self-joins; multiple WHERE conditions in one query yield
@@ -24,7 +28,8 @@ use crate::error::BatonError;
 use crate::ffi;
 use crate::operations::list::{add_select, add_where, new_query_inp, run_query, sql_escape};
 use crate::types::{
-    AvuQuery, Collection, DataObject, MetaqueryInput, Operator, Target, TimestampQuery,
+    AccessQuery, AclLevel, AvuQuery, Collection, DataObject, MetaqueryInput, Operator, Target,
+    TimestampQuery,
 };
 
 /// Which kinds of objects to include in the search.
@@ -65,8 +70,13 @@ impl Default for MetaqueryFlags {
 /// timestamps as zero-padded epoch strings (e.g. `"01777320246"`),
 /// and the caller is responsible for supplying the same form.
 ///
-/// Access selectors are still silently ignored at this stage;
-/// commit 5 wires them in.
+/// Access selectors filter by `(owner, level [, zone])`. Levels are
+/// translated from the [`AclLevel`] enum into iRODS's verbose
+/// catalog form (`read` → `"read object"`, `write` → `"modify
+/// object"`, `null`/`own` pass through). The data-object path joins
+/// via `COL_USER_*`; the collection path joins via `COL_COLL_USER_*`
+/// — different column families because iRODS routes the join
+/// through the access table that matches the queried object kind.
 pub fn metaquery(
     conn: &mut RodsConnection,
     input: &MetaqueryInput,
@@ -137,6 +147,7 @@ fn query_data_objects(
 
     apply_avu_conditions_to_data_object(inp_ref, &input.avus)?;
     apply_timestamp_conditions_to_data_object(inp_ref, &input.timestamps)?;
+    apply_access_conditions_to_data_object(inp_ref, &input.access)?;
     apply_collection_scope(inp_ref, input)?;
 
     let rows = run_query(conn, inp_ref)?;
@@ -171,6 +182,7 @@ fn query_collections(
 
     apply_avu_conditions_to_collection(inp_ref, &input.avus)?;
     apply_timestamp_conditions_to_collection(inp_ref, &input.timestamps)?;
+    apply_access_conditions_to_collection(inp_ref, &input.access)?;
     apply_collection_scope(inp_ref, input)?;
 
     let rows = run_query(conn, inp_ref)?;
@@ -285,6 +297,81 @@ fn apply_timestamp_conditions_to_collection(
                 inp,
                 ffi::COL_COLL_MODIFY_TIME as i32,
                 &condition_for(ts.operator, modified),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Translate an [`AclLevel`] into the iRODS catalog's stored access-name
+/// string. iRODS uses verbose forms internally (`"read object"`,
+/// `"modify object"`); our enum's compact serialisation (`read`,
+/// `write`) is the JSON-shape variant baton emits, not what the
+/// catalog matches against.
+fn acl_level_to_irods_name(level: AclLevel) -> &'static str {
+    match level {
+        AclLevel::Null => "null",
+        AclLevel::Read => "read object",
+        AclLevel::Write => "modify object",
+        AclLevel::Own => "own",
+    }
+}
+
+/// Filter a data-object query by `(owner, level [, zone])`. Joins via
+/// the data-access path; uses `COL_USER_*` columns alongside
+/// `COL_DATA_ACCESS_NAME`, mirroring the data-object branch in
+/// `fetch_acl` from Session 3b.
+fn apply_access_conditions_to_data_object(
+    inp: &mut ffi::genQueryInp_t,
+    accesses: &[AccessQuery],
+) -> Result<(), BatonError> {
+    for q in accesses {
+        add_where(
+            inp,
+            ffi::COL_USER_NAME as i32,
+            &format!("= '{}'", sql_escape(&q.owner)),
+        )?;
+        add_where(
+            inp,
+            ffi::COL_DATA_ACCESS_NAME as i32,
+            &format!("= '{}'", acl_level_to_irods_name(q.level)),
+        )?;
+        if let Some(zone) = &q.zone {
+            add_where(
+                inp,
+                ffi::COL_USER_ZONE as i32,
+                &format!("= '{}'", sql_escape(zone)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Filter a collection query by `(owner, level [, zone])`. Uses
+/// `COL_COLL_USER_*` columns — different from the data-object path
+/// because iRODS routes the user-name join through the
+/// collection-access table when those columns appear in the SELECT
+/// or WHERE list. Same split we caught the hard way in Session 3b.
+fn apply_access_conditions_to_collection(
+    inp: &mut ffi::genQueryInp_t,
+    accesses: &[AccessQuery],
+) -> Result<(), BatonError> {
+    for q in accesses {
+        add_where(
+            inp,
+            ffi::COL_COLL_USER_NAME as i32,
+            &format!("= '{}'", sql_escape(&q.owner)),
+        )?;
+        add_where(
+            inp,
+            ffi::COL_COLL_ACCESS_NAME as i32,
+            &format!("= '{}'", acl_level_to_irods_name(q.level)),
+        )?;
+        if let Some(zone) = &q.zone {
+            add_where(
+                inp,
+                ffi::COL_COLL_USER_ZONE as i32,
+                &format!("= '{}'", sql_escape(zone)),
             )?;
         }
     }

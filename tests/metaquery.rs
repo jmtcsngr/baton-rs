@@ -10,7 +10,7 @@
 use std::process::Command;
 
 use baton_rs::operations::metaquery::{metaquery, MetaqueryFlags};
-use baton_rs::types::{AvuQuery, MetaqueryInput, Operator, TimestampQuery};
+use baton_rs::types::{AccessQuery, AclLevel, AvuQuery, MetaqueryInput, Operator, TimestampQuery};
 use baton_rs::{RodsConnection, Target};
 
 struct IrodsCleanup(String);
@@ -246,6 +246,106 @@ fn metaquery_timestamp_range_returns_recent_object() {
         )),
         "expected staged object excluded by future-epoch timestamp filter, got {:?}",
         misses
+    );
+}
+
+#[test]
+fn metaquery_access_selector_finds_owned_object() {
+    // iput'd objects always have the calling user with `own` access.
+    // Combined with a unique AVU, the access selector should narrow
+    // results to exactly the staged object.
+    let local = "/tmp/baton_rs_metaquery_acl";
+    std::fs::write(local, b"metaquery acl").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_metaquery_acl";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    imeta_add(
+        "-d",
+        &remote,
+        "baton_rs_metaquery_acl_attr",
+        "acl_v",
+        None,
+    );
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_metaquery_acl_attr".to_string(),
+            value: "acl_v".to_string(),
+            units: None,
+            operator: Operator::Equals,
+        }],
+        timestamps: vec![],
+        access: vec![AccessQuery {
+            owner: "irods".to_string(),
+            level: AclLevel::Own,
+            zone: None,
+        }],
+        collection: None,
+        zone: None,
+    };
+
+    let results = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery");
+
+    assert!(
+        results.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == data_object
+        )),
+        "expected staged object in results, got {:?}",
+        results
+    );
+
+    // Negative case: same AVU, but require a non-existent owner. The
+    // staged object should NOT show up.
+    let input_no_match = MetaqueryInput {
+        avus: vec![AvuQuery {
+            attribute: "baton_rs_metaquery_acl_attr".to_string(),
+            value: "acl_v".to_string(),
+            units: None,
+            operator: Operator::Equals,
+        }],
+        timestamps: vec![],
+        access: vec![AccessQuery {
+            owner: "definitely_not_a_real_user".to_string(),
+            level: AclLevel::Own,
+            zone: None,
+        }],
+        collection: None,
+        zone: None,
+    };
+
+    let no_match = metaquery(
+        &mut conn,
+        &input_no_match,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery (no-match)");
+
+    assert!(
+        !no_match.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == data_object
+        )),
+        "staged object should be excluded by bogus-owner ACL filter, got {:?}",
+        no_match
     );
 }
 
