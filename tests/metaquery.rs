@@ -386,6 +386,87 @@ fn metaquery_access_selector_finds_owned_object() {
 }
 
 #[test]
+fn metaquery_multi_avu_intersection() {
+    // Two data objects:
+    //   obj_both has both AVUs A1 and A2
+    //   obj_one  has only A1
+    // Query for both AVUs → expect obj_both, not obj_one.
+    let local_both = "/tmp/baton_rs_metaquery_both";
+    let local_one = "/tmp/baton_rs_metaquery_one";
+    std::fs::write(local_both, b"both").expect("write both");
+    std::fs::write(local_one, b"one").expect("write one");
+
+    let remote_coll = "/testZone/home/irods";
+    let do_both = "baton_rs_metaquery_both";
+    let do_one = "baton_rs_metaquery_one";
+    let r_both = format!("{}/{}", remote_coll, do_both);
+    let r_one = format!("{}/{}", remote_coll, do_one);
+
+    iput(local_both, &r_both);
+    iput(local_one, &r_one);
+    let _c1 = IrodsCleanup(r_both.clone());
+    let _c2 = IrodsCleanup(r_one.clone());
+
+    // Use unique attribute names so we don't accidentally match
+    // unrelated catalog state.
+    imeta_add("-d", &r_both, "baton_rs_multi_a1", "v1", None);
+    imeta_add("-d", &r_both, "baton_rs_multi_a2", "v2", None);
+    imeta_add("-d", &r_one, "baton_rs_multi_a1", "v1", None);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = MetaqueryInput {
+        avus: vec![
+            AvuQuery {
+                attribute: "baton_rs_multi_a1".to_string(),
+                value: "v1".to_string(),
+                units: None,
+                operator: Operator::Equals,
+            },
+            AvuQuery {
+                attribute: "baton_rs_multi_a2".to_string(),
+                value: "v2".to_string(),
+                units: None,
+                operator: Operator::Equals,
+            },
+        ],
+        timestamps: vec![],
+        access: vec![],
+        collection: None,
+        zone: None,
+    };
+
+    let results = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect("metaquery (multi-AVU)");
+
+    let in_results = |name: &str| {
+        results.iter().any(|t| matches!(
+            t,
+            Target::DataObject(d) if d.collection == remote_coll && d.data_object == name
+        ))
+    };
+
+    assert!(
+        in_results(do_both),
+        "expected obj-with-both-AVUs in results, got {:?}",
+        results,
+    );
+    assert!(
+        !in_results(do_one),
+        "obj-with-only-one-AVU should be excluded by AVU intersection, got {:?}",
+        results,
+    );
+}
+
+#[test]
 fn metaquery_empty_input_returns_empty_results() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");

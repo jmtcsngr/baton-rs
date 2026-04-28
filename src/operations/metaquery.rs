@@ -17,11 +17,17 @@
 //!   join. Data objects and collections use different join columns
 //!   (`COL_USER_*` vs `COL_COLL_USER_*`), same split that bit us in
 //!   Session 3b's `--acl` work.
-//! - commit 6: multi-AVU criteria via per-AVU subqueries + result
-//!   intersection (iRODS's `rcGenQuery` doesn't naturally express
-//!   metadata self-joins; multiple WHERE conditions in one query yield
-//!   "objects with at least one AVU matching all of these constraints",
-//!   not "objects with all of these AVUs").
+//! - **commit 6 (this commit):** multi-AVU criteria via per-AVU
+//!   subqueries + result intersection. iRODS's `rcGenQuery` doesn't
+//!   naturally express metadata self-joins — chaining multiple WHERE
+//!   conditions on `COL_META_*_ATTR_NAME` / `COL_META_*_ATTR_VALUE` in
+//!   one query asks the parser for a single AVU row that matches every
+//!   pair simultaneously, which is impossible (a row has one attribute
+//!   name). The fix: run one subquery per AVU, intersect the resulting
+//!   path sets. Other criteria (timestamps, access, scope) ride along
+//!   on every subquery.
+
+use std::collections::HashSet;
 
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
@@ -55,14 +61,12 @@ impl Default for MetaqueryFlags {
 
 /// Search the catalog for objects matching `input`. Multiple result
 /// kinds (data objects + collections) are returned in one flat
-/// [`Vec`]; preserve catalog order, no further sorting applied.
+/// [`Vec`].
 ///
-/// AVU criteria are applied as multiple WHERE conditions, which
-/// gives iRODS's "any AVU on the object matches all these conditions"
-/// semantic — wrong for a true `AND` interpretation when more than
-/// one AVU is supplied. Commit 6 replaces that with a per-AVU
-/// subquery + intersection that matches baton's documented
-/// behaviour.
+/// Single-AVU and zero-AVU inputs run as one genQuery per object
+/// kind. Multi-AVU inputs run one subquery per AVU and intersect the
+/// matching paths — see the per-function comments below for the why.
+/// Result order is not guaranteed.
 ///
 /// Timestamp criteria translate into WHERE conditions on the
 /// `D_CREATE_TIME` / `D_MODIFY_TIME` (or `COLL_*` equivalents)
@@ -89,14 +93,25 @@ pub fn metaquery(
         return Ok(Vec::new());
     }
 
+    let multi_avu = input.avus.len() > 1;
     let mut results: Vec<Target> = Vec::new();
 
     if flags.include_data_objects {
-        results.extend(query_data_objects(conn, input)?);
+        let part = if multi_avu {
+            query_data_objects_intersect(conn, input)?
+        } else {
+            query_data_objects(conn, input)?
+        };
+        results.extend(part);
     }
 
     if flags.include_collections {
-        results.extend(query_collections(conn, input)?);
+        let part = if multi_avu {
+            query_collections_intersect(conn, input)?
+        } else {
+            query_collections(conn, input)?
+        };
+        results.extend(part);
     }
 
     Ok(results)
@@ -171,6 +186,64 @@ fn query_data_objects(
         .collect())
 }
 
+/// Multi-AVU data-object search: run one subquery per AVU and
+/// intersect the resulting `(collection, data_object)` paths. Each
+/// subquery carries the same timestamp / access / scope criteria, so
+/// they're applied uniformly. Short-circuits when the running
+/// intersection becomes empty — no point doing more catalog round
+/// trips when nothing can possibly match.
+fn query_data_objects_intersect(
+    conn: &mut RodsConnection,
+    input: &MetaqueryInput,
+) -> Result<Vec<Target>, BatonError> {
+    let mut running: Option<HashSet<(String, String)>> = None;
+
+    for avu in &input.avus {
+        let sub_input = MetaqueryInput {
+            avus: vec![avu.clone()],
+            timestamps: input.timestamps.clone(),
+            access: input.access.clone(),
+            collection: input.collection.clone(),
+            zone: input.zone.clone(),
+        };
+        let sub = query_data_objects(conn, &sub_input)?;
+        let sub_set: HashSet<(String, String)> = sub
+            .into_iter()
+            .filter_map(|t| match t {
+                Target::DataObject(d) => Some((d.collection, d.data_object)),
+                _ => None,
+            })
+            .collect();
+
+        running = Some(match running {
+            None => sub_set,
+            Some(prev) => prev.intersection(&sub_set).cloned().collect(),
+        });
+
+        if running.as_ref().map_or(false, |s| s.is_empty()) {
+            break;
+        }
+    }
+
+    Ok(running
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(collection, data_object)| {
+            Target::DataObject(DataObject {
+                collection,
+                data_object,
+                size: None,
+                checksum: None,
+                avus: None,
+                access: None,
+                replicates: None,
+                timestamps: None,
+                error: None,
+            })
+        })
+        .collect())
+}
+
 fn query_collections(
     conn: &mut RodsConnection,
     input: &MetaqueryInput,
@@ -190,6 +263,57 @@ fn query_collections(
         .into_iter()
         .map(|row| {
             let collection = row.into_iter().next().unwrap_or_default();
+            Target::Collection(Collection {
+                collection,
+                avus: None,
+                access: None,
+                timestamps: None,
+                contents: None,
+                error: None,
+            })
+        })
+        .collect())
+}
+
+/// Multi-AVU collection search — same intersection strategy as for
+/// data objects but on `Vec<String>` of collection paths.
+fn query_collections_intersect(
+    conn: &mut RodsConnection,
+    input: &MetaqueryInput,
+) -> Result<Vec<Target>, BatonError> {
+    let mut running: Option<HashSet<String>> = None;
+
+    for avu in &input.avus {
+        let sub_input = MetaqueryInput {
+            avus: vec![avu.clone()],
+            timestamps: input.timestamps.clone(),
+            access: input.access.clone(),
+            collection: input.collection.clone(),
+            zone: input.zone.clone(),
+        };
+        let sub = query_collections(conn, &sub_input)?;
+        let sub_set: HashSet<String> = sub
+            .into_iter()
+            .filter_map(|t| match t {
+                Target::Collection(c) => Some(c.collection),
+                _ => None,
+            })
+            .collect();
+
+        running = Some(match running {
+            None => sub_set,
+            Some(prev) => prev.intersection(&sub_set).cloned().collect(),
+        });
+
+        if running.as_ref().map_or(false, |s| s.is_empty()) {
+            break;
+        }
+    }
+
+    Ok(running
+        .unwrap_or_default()
+        .into_iter()
+        .map(|collection| {
             Target::Collection(Collection {
                 collection,
                 avus: None,
