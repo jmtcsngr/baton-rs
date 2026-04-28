@@ -50,10 +50,16 @@ fn main() {
         .allowlist_function("addInxVal")
         .allowlist_function("clearGenQueryInp")
         .allowlist_function("freeGenQueryOut")
+        // AVU add/remove — baton-metamod's only iRODS call. iRODS encodes
+        // the operation via positional arg0..arg9 strings on the input
+        // struct (arg0=operation, arg1=target-type-flag, arg2=path, etc.);
+        // the safe wrapper hides that stringly-typed shape.
+        .allowlist_function("rcModAVUMetadata")
         // Types referenced by those functions.
         .allowlist_type("rcComm_t")
         .allowlist_type("rodsEnv")
         .allowlist_type("rErrMsg_t")
+        .allowlist_type("modAVUMetadataInp_t")
         .allowlist_type("dataObjInp_t")
         .allowlist_type("rodsObjStat_t")
         .allowlist_type("objType_t")
