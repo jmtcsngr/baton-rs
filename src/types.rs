@@ -238,6 +238,86 @@ impl Target {
     }
 }
 
+/// One operation `baton-metamod` can perform per input line.
+///
+/// Carried inline on each [`MetamodInput`] so a single NDJSON stream
+/// can mix adds and removes — matches upstream baton's behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetamodOperation {
+    Add,
+    Rm,
+}
+
+/// One input record for `baton-metamod`.
+///
+/// JSON shape:
+/// ```text
+/// {
+///   "collection": "/zone/coll",
+///   "data_object": "foo.txt",        // optional; collections omit it
+///   "operation":   "add",            // or "rm"
+///   "avus":        [{"attribute": "a", "value": "v", "units": "u"}],
+///   "error":       {...}             // populated by in-band failure
+/// }
+/// ```
+///
+/// Sibling of [`Target`] rather than a wrapping enum: `operation` and
+/// `avus` need to live at the top level next to `collection` /
+/// `data_object`, and flattening `Target` (which is itself an untagged
+/// enum) into a struct fights serde's resolution rules. A focused
+/// struct with a [`Self::target`] accessor is cheaper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetamodInput {
+    pub collection: String,
+
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data_object: Option<String>,
+
+    pub operation: MetamodOperation,
+
+    /// AVUs to add or remove. baton accepts an empty list (no-op for
+    /// the input); we mirror that — a record with an empty `avus`
+    /// array succeeds without making any catalog calls.
+    #[serde(default)]
+    pub avus: Vec<Avu>,
+
+    /// Populated by in-band error annotation when the operation fails
+    /// for this specific input. Same pattern as `DataObject.error` /
+    /// `Collection.error`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<BatonError>,
+}
+
+impl MetamodInput {
+    /// Project this input into the [`Target`] form the connection layer
+    /// understands. The resulting `DataObject` / `Collection` carries
+    /// only path identity — none of the metadata fields are populated.
+    pub fn target(&self) -> Target {
+        match &self.data_object {
+            Some(name) => Target::DataObject(DataObject {
+                collection: self.collection.clone(),
+                data_object: name.clone(),
+                size: None,
+                checksum: None,
+                avus: None,
+                access: None,
+                replicates: None,
+                timestamps: None,
+                error: None,
+            }),
+            None => Target::Collection(Collection {
+                collection: self.collection.clone(),
+                avus: None,
+                access: None,
+                timestamps: None,
+                contents: None,
+                error: None,
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +636,87 @@ mod tests {
             Some("USER_FILE_DOES_NOT_EXIST")
         );
         assert_eq!(serde_json::to_string(&d).unwrap(), json);
+    }
+
+    // --- MetamodInput ---
+
+    #[test]
+    fn metamod_operation_round_trip_lowercase() {
+        let add: MetamodOperation = serde_json::from_str(r#""add""#).unwrap();
+        assert_eq!(add, MetamodOperation::Add);
+        assert_eq!(serde_json::to_string(&add).unwrap(), r#""add""#);
+
+        let rm: MetamodOperation = serde_json::from_str(r#""rm""#).unwrap();
+        assert_eq!(rm, MetamodOperation::Rm);
+        assert_eq!(serde_json::to_string(&rm).unwrap(), r#""rm""#);
+    }
+
+    #[test]
+    fn metamod_input_data_object_round_trip() {
+        let json = r#"{"collection":"/z/home/u","data_object":"foo.txt","operation":"add","avus":[{"attribute":"a","value":"v","units":"u"}]}"#;
+        let input: MetamodInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.collection, "/z/home/u");
+        assert_eq!(input.data_object.as_deref(), Some("foo.txt"));
+        assert_eq!(input.operation, MetamodOperation::Add);
+        assert_eq!(input.avus.len(), 1);
+        assert_eq!(input.avus[0].attribute, "a");
+        assert_eq!(input.error, None);
+        assert_eq!(serde_json::to_string(&input).unwrap(), json);
+    }
+
+    #[test]
+    fn metamod_input_collection_round_trip() {
+        // No data_object key for a collection target.
+        let json = r#"{"collection":"/z/home/u","operation":"rm","avus":[]}"#;
+        let input: MetamodInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.data_object, None);
+        assert_eq!(input.operation, MetamodOperation::Rm);
+        assert!(input.avus.is_empty());
+        assert_eq!(serde_json::to_string(&input).unwrap(), json);
+    }
+
+    #[test]
+    fn metamod_input_target_data_object() {
+        let input = MetamodInput {
+            collection: "/z/home/u".to_string(),
+            data_object: Some("foo.txt".to_string()),
+            operation: MetamodOperation::Add,
+            avus: vec![],
+            error: None,
+        };
+        match input.target() {
+            Target::DataObject(d) => {
+                assert_eq!(d.collection, "/z/home/u");
+                assert_eq!(d.data_object, "foo.txt");
+                // None of the metadata fields are seeded by .target().
+                assert!(d.avus.is_none());
+                assert!(d.access.is_none());
+            }
+            other => panic!("expected DataObject, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn metamod_input_target_collection() {
+        let input = MetamodInput {
+            collection: "/z/home/u".to_string(),
+            data_object: None,
+            operation: MetamodOperation::Rm,
+            avus: vec![],
+            error: None,
+        };
+        match input.target() {
+            Target::Collection(c) => assert_eq!(c.collection, "/z/home/u"),
+            other => panic!("expected Collection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn metamod_input_with_error_annotation_round_trip() {
+        let json = r#"{"collection":"/z/home/u","data_object":"foo.txt","operation":"add","avus":[],"error":{"code":-310000,"message":"USER_FILE_DOES_NOT_EXIST"}}"#;
+        let input: MetamodInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.error.as_ref().map(|e| e.code), Some(-310000));
+        assert_eq!(serde_json::to_string(&input).unwrap(), json);
     }
 
     // --- Operator ---
