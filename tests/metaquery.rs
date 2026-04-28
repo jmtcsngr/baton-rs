@@ -7,7 +7,7 @@
 //! asserts that the staged path turns up in the results. Drop guards
 //! tear down on Drop (including across panic).
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use baton_rs::operations::metaquery::{metaquery, MetaqueryFlags};
 use baton_rs::types::{AccessQuery, AclLevel, AvuQuery, MetaqueryInput, Operator, TimestampQuery};
@@ -28,17 +28,27 @@ fn iput(local: &str, remote: &str) {
     assert!(status.success(), "iput {} {} failed", local, remote);
 }
 
-/// Returns true iff iRODS has a user with the given name. Uses
-/// `iuserinfo`, which exits with status 0 when the user exists and
-/// non-zero otherwise. Stdout/stderr suppressed because we only care
-/// about the exit code.
+/// Returns true iff iRODS has a user with the given name.
+///
+/// Uses `iquest` rather than `iuserinfo` for the existence check:
+/// `iuserinfo` exits with status 0 even for non-existent users (it
+/// treats "user not found" as a normal informational outcome rather
+/// than an error), so its exit status alone can't tell the two cases
+/// apart. `iquest` runs a catalog query directly: stdout contains the
+/// matched username on its own line when the user exists, and
+/// `CAT_NO_ROWS_FOUND` (or similar diagnostic) when it doesn't.
 fn user_exists(name: &str) -> bool {
-    Command::new("iuserinfo")
-        .arg(name)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
+    Command::new("iquest")
+        .args([
+            "%s",
+            &format!("SELECT USER_NAME WHERE USER_NAME = '{}'", name),
+        ])
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|line| line.trim() == name)
+        })
         .unwrap_or(false)
 }
 
