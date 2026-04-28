@@ -52,19 +52,23 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg("-I/usr/include/irods")
-        // Functions used by the connection and error-mapping layers.
-        .allowlist_function("rcConnect")
-        .allowlist_function("rcDisconnect")
+        // Shim functions / types — the version-agnostic C surface from
+        // `shim/ffi_shim.h`. Every subsystem migrated in Session 4.5
+        // calls these instead of the raw iRODS API. The opaque
+        // `shim_rods_conn` forward declaration is allowlisted as a type
+        // so Rust can hold a `*mut ffi::shim_rods_conn` without bindgen
+        // ever seeing the underlying `rcComm_t` definition.
+        .allowlist_function("shim_.*")
+        .allowlist_type("shim_env_t")
+        .allowlist_type("shim_stat_t")
+        .allowlist_type("shim_rods_conn")
+        // iRODS functions still called directly by not-yet-migrated
+        // subsystems. Each batch moves behind the shim in subsequent
+        // commits (queries, metamod, error-name lookup), at which point
+        // its entry here goes away.
         .allowlist_function("clientLogin")
-        .allowlist_function("clientLoginWithPassword")
-        .allowlist_function("getRodsEnv")
-        .allowlist_function("obfGetPw")
         .allowlist_function("rErrMsg")
         .allowlist_function("rodsErrorName")
-        // Stat — the primitive baton-list uses to confirm a path exists and
-        // to read size / checksum without a full catalog query.
-        .allowlist_function("rcObjStat")
-        .allowlist_function("freeRodsObjStat")
         // General catalog query — every metadata flag (--avu / --acl /
         // --replicate / --timestamp) goes through rcGenQuery.
         .allowlist_function("rcGenQuery")
@@ -77,14 +81,10 @@ fn main() {
         // struct (arg0=operation, arg1=target-type-flag, arg2=path, etc.);
         // the safe wrapper hides that stringly-typed shape.
         .allowlist_function("rcModAVUMetadata")
-        // Types referenced by those functions.
+        // Types referenced by the iRODS functions still called directly.
         .allowlist_type("rcComm_t")
-        .allowlist_type("rodsEnv")
         .allowlist_type("rErrMsg_t")
         .allowlist_type("modAVUMetadataInp_t")
-        .allowlist_type("dataObjInp_t")
-        .allowlist_type("rodsObjStat_t")
-        .allowlist_type("objType_t")
         .allowlist_type("genQueryInp_t")
         .allowlist_type("genQueryOut_t")
         .allowlist_type("sqlResult_t")

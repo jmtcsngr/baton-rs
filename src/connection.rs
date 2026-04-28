@@ -5,15 +5,18 @@
 
 //! Safe wrapper around an iRODS client connection.
 //!
-//! This module exposes `RodsConnection`, a RAII handle over `rcComm_t *`.
-//! Constructing one calls `rcConnect`; dropping one calls `rcDisconnect`. The
-//! raw connection pointer is never exposed outside this module — everything
-//! a caller can do with a connection goes through safe methods that land in
-//! later commits (authentication, reconnect, per-operation calls).
+//! This module exposes `RodsConnection`, a RAII handle over an opaque
+//! `shim_rods_conn_t *` (internally a `rcComm_t *`, hidden inside the C
+//! shim — see `shim/ffi_shim.{c,h}` and issue #9 for the rationale).
+//! Constructing one calls `shim_open` (`rcConnect`); dropping one calls
+//! `shim_close` (`rcDisconnect`). Operations that haven't migrated to
+//! the shim yet (queries, metamod) cast back to `*mut ffi::rcComm_t`
+//! at the call site; later commits in Session 4.5 push them through
+//! the shim too.
 //!
-//! Connections are single-threaded by default: the underlying `rcComm_t *` is
-//! not safe to share across threads, and the raw-pointer field makes
-//! `RodsConnection` `!Send` and `!Sync` automatically.
+//! Connections are single-threaded by default: the underlying iRODS
+//! handle is not safe to share across threads, and the raw-pointer
+//! field makes `RodsConnection` `!Send` and `!Sync` automatically.
 
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
@@ -44,7 +47,7 @@ pub enum ObjType {
 
 /// A live connection to an iRODS server.
 pub struct RodsConnection {
-    conn: *mut ffi::rcComm_t,
+    conn: *mut ffi::shim_rods_conn,
 }
 
 impl RodsConnection {
@@ -59,35 +62,44 @@ impl RodsConnection {
         Ok(Self { conn })
     }
 
-    /// Internal: open a fresh `rcComm_t *` using the iRODS environment
+    /// Internal: open a fresh connection using the iRODS environment
     /// file. Shared between [`Self::connect_from_env`] and
     /// [`Self::reconnect`] so both use the same connect parameters.
-    fn open_raw() -> Result<*mut ffi::rcComm_t, BatonError> {
-        let mut env = MaybeUninit::<ffi::rodsEnv>::zeroed();
-        let env_status = unsafe { ffi::getRodsEnv(env.as_mut_ptr()) };
+    ///
+    /// Goes through the shim's `shim_get_env` + `shim_open`. The shim
+    /// reads `rodsEnv`, calls `rcConnect`, and surfaces the error
+    /// message text via a caller-supplied buffer — bindings never see
+    /// the iRODS structs.
+    fn open_raw() -> Result<*mut ffi::shim_rods_conn, BatonError> {
+        let mut env = MaybeUninit::<ffi::shim_env_t>::zeroed();
+        let env_status = unsafe { ffi::shim_get_env(env.as_mut_ptr()) };
         if env_status != 0 {
             return Err(BatonError::from_irods(env_status));
         }
         let env = unsafe { env.assume_init() };
 
-        let mut err_msg = MaybeUninit::<ffi::rErrMsg_t>::zeroed();
+        let mut status: std::os::raw::c_int = 0;
+        // Buffer size is generous — iRODS error messages are bounded but
+        // we'd rather truncate cleanly inside the shim than guess too low.
+        let mut err_msg: [std::os::raw::c_char; 1024] = [0; 1024];
+
         let conn = unsafe {
-            ffi::rcConnect(
-                env.rodsHost.as_ptr(),
-                env.rodsPort,
-                env.rodsUserName.as_ptr(),
-                env.rodsZone.as_ptr(),
-                0, // reconnFlag
+            ffi::shim_open(
+                env.host.as_ptr(),
+                env.port,
+                env.user.as_ptr(),
+                env.zone.as_ptr(),
+                &mut status,
                 err_msg.as_mut_ptr(),
+                err_msg.len() as std::os::raw::c_int,
             )
         };
 
         if conn.is_null() {
-            let err_msg = unsafe { err_msg.assume_init() };
-            let msg = unsafe { CStr::from_ptr(err_msg.msg.as_ptr()) }
+            let msg = unsafe { CStr::from_ptr(err_msg.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
-            return Err(BatonError::from_irods_with_context(err_msg.status, &msg));
+            return Err(BatonError::from_irods_with_context(status, &msg));
         }
 
         Ok(conn)
@@ -96,70 +108,38 @@ impl RodsConnection {
     /// Stat an iRODS path to confirm existence and discover basic metadata
     /// (size, checksum, object type).
     ///
-    /// Wraps `rcObjStat` + `freeRodsObjStat`. Callers get a plain Rust
-    /// [`ObjStat`]; the underlying iRODS allocation is released before this
-    /// method returns.
+    /// Wraps `shim_stat`, which internally builds the `dataObjInp_t`,
+    /// calls `rcObjStat`, copies the relevant fields, and frees the
+    /// iRODS allocation before returning. Callers see only the POD
+    /// `shim_stat_t`.
     pub fn stat(&mut self, path: &str) -> Result<ObjStat, BatonError> {
-        // Build the input struct. Only objPath is populated; everything else
-        // is left zeroed (rcObjStat reads no other fields for a plain stat).
-        let mut inp = MaybeUninit::<ffi::dataObjInp_t>::zeroed();
-        let inp_ref = unsafe { inp.assume_init_mut() };
-
         let path_c = CString::new(path).map_err(|_| BatonError {
             code: -1,
             message: "path contains interior NUL".to_string(),
         })?;
-        let path_bytes = path_c.as_bytes();
-        if path_bytes.len() >= inp_ref.objPath.len() {
-            return Err(BatonError {
-                code: -1,
-                message: format!(
-                    "path length {} exceeds MAX_NAME_LEN {}",
-                    path_bytes.len(),
-                    inp_ref.objPath.len() - 1
-                ),
-            });
-        }
-        for (i, &b) in path_bytes.iter().enumerate() {
-            inp_ref.objPath[i] = b as std::os::raw::c_char;
-        }
-        // objPath was zero-initialised, so the NUL terminator is already there.
 
-        let mut stat_out: *mut ffi::rodsObjStat_t = std::ptr::null_mut();
-        let status = unsafe { ffi::rcObjStat(self.conn, inp_ref, &mut stat_out) };
+        let mut out = MaybeUninit::<ffi::shim_stat_t>::zeroed();
+        let status = unsafe { ffi::shim_stat(self.conn, path_c.as_ptr(), out.as_mut_ptr()) };
 
         if status < 0 {
             return Err(BatonError::from_irods(status));
         }
-        if stat_out.is_null() {
-            return Err(BatonError {
-                code: -1,
-                message: "rcObjStat returned null with non-negative status".to_string(),
-            });
-        }
+        let out = unsafe { out.assume_init() };
 
-        // Read out the fields we care about while stat_out is still valid.
-        let stat_ref = unsafe { &*stat_out };
-        let obj_type = match stat_ref.objType as i32 {
-            // DATA_OBJ_T = 1, COLL_OBJ_T = 2 in iRODS rodsType.h.
+        let obj_type = match out.obj_type {
+            // 1 = data object, 2 = collection — see shim_stat_t docs.
             1 => ObjType::DataObject,
             2 => ObjType::Collection,
             other => ObjType::Other(other),
         };
-        let result = ObjStat {
-            size: stat_ref.objSize as u64,
-            checksum: unsafe { CStr::from_ptr(stat_ref.chksum.as_ptr()) }
+
+        Ok(ObjStat {
+            size: out.size as u64,
+            checksum: unsafe { CStr::from_ptr(out.checksum.as_ptr()) }
                 .to_string_lossy()
                 .into_owned(),
             obj_type,
-        };
-
-        // Always free, even if we'd constructed an error above.
-        unsafe {
-            ffi::freeRodsObjStat(stat_out);
-        }
-
-        Ok(result)
+        })
     }
 
     /// Execute a prepared `genQueryInp_t` and return every matching row as
@@ -176,6 +156,10 @@ impl RodsConnection {
     /// don't want to leak raw iRODS structs through the public API. The
     /// per-flag helpers in `crate::operations` build the input locally and
     /// expose typed wrappers.
+    ///
+    /// Still calls `rcGenQuery` directly — the cast to `*mut ffi::rcComm_t`
+    /// is the price for incremental migration. Commit 3 of Session 4.5
+    /// moves this through the shim and removes the cast.
     pub(crate) fn query(
         &mut self,
         inp: &mut ffi::genQueryInp_t,
@@ -184,7 +168,9 @@ impl RodsConnection {
 
         loop {
             let mut out: *mut ffi::genQueryOut_t = std::ptr::null_mut();
-            let status = unsafe { ffi::rcGenQuery(self.conn, inp, &mut out) };
+            let status = unsafe {
+                ffi::rcGenQuery(self.conn as *mut ffi::rcComm_t, inp, &mut out)
+            };
 
             // A successful query that matched no rows returns
             // CAT_NO_ROWS_FOUND (-808000). Report as empty, not an error.
@@ -252,6 +238,10 @@ impl RodsConnection {
     /// All `CString` allocations live for the `rcModAVUMetadata` call
     /// only — iRODS does not retain pointers past return, so the
     /// stack-local strings can be dropped immediately after.
+    ///
+    /// Still calls `rcModAVUMetadata` directly — the cast to
+    /// `*mut ffi::rcComm_t` is temporary; commit 4 of Session 4.5
+    /// moves this through the shim.
     pub fn mod_avu(
         &mut self,
         operation: MetamodOperation,
@@ -308,7 +298,9 @@ impl RodsConnection {
         }
         // arg6..arg9 stay null from the zeroed initialiser.
 
-        let status = unsafe { ffi::rcModAVUMetadata(self.conn, inp_ref) };
+        let status = unsafe {
+            ffi::rcModAVUMetadata(self.conn as *mut ffi::rcComm_t, inp_ref)
+        };
 
         // CStrings drop here; the dangling pointers in `inp` are
         // harmless because rcModAVUMetadata has already returned.
@@ -332,11 +324,11 @@ impl RodsConnection {
     /// disconnect step), so it's always safe to drop the
     /// [`RodsConnection`] after a failed reconnect.
     pub fn reconnect(&mut self) -> Result<(), BatonError> {
-        // Close the current connection. rcDisconnect's return is a
-        // status we have nothing useful to do with on the teardown path.
+        // Close the current connection. shim_close's return is a status
+        // we have nothing useful to do with on the teardown path.
         if !self.conn.is_null() {
             unsafe {
-                ffi::rcDisconnect(self.conn);
+                ffi::shim_close(self.conn);
             }
             self.conn = std::ptr::null_mut();
         }
@@ -362,34 +354,36 @@ impl RodsConnection {
     /// icommands authenticate fine.
     ///
     /// The flow here instead matches what `iinit`/`ils` do under the
-    /// hood:
+    /// hood, via the C shim:
     ///
-    /// 1. `obfGetPw` reads and deobfuscates the `.irodsA` file into a
-    ///    plaintext password buffer.
-    /// 2. `clientLoginWithPassword` runs the legacy native auth handshake
-    ///    (`rcAuthRequest` → MD5(challenge + password) → `rcAuthResponse`)
-    ///    without touching API 110000.
+    /// 1. `shim_get_password` (`obfGetPw`) reads and deobfuscates the
+    ///    `.irodsA` file into a plaintext password buffer.
+    /// 2. `shim_login_password` (`clientLoginWithPassword`) runs the
+    ///    legacy native auth handshake (`rcAuthRequest` →
+    ///    MD5(challenge + password) → `rcAuthResponse`) without
+    ///    touching API 110000.
     ///
-    /// Only native auth is supported in Session 2. PAM/GSI/Kerberos and
+    /// Only native auth is supported. PAM/GSI/Kerberos and
     /// interactive-password flows are out of scope and would land as
     /// separate methods in whichever session first needs them.
     pub fn login_from_auth_file(&mut self) -> Result<(), BatonError> {
-        // MAX_PASSWORD_LEN is 50 in iRODS; sized generously here.
+        // MAX_PASSWORD_LEN is 50 in iRODS; sized generously here. The
+        // shim sanity-checks buf_len ≥ 64 before delegating to obfGetPw.
         let mut password: [std::os::raw::c_char; 128] = [0; 128];
 
-        let status = unsafe { ffi::obfGetPw(password.as_mut_ptr()) };
+        let status = unsafe {
+            ffi::shim_get_password(password.as_mut_ptr(), password.len() as std::os::raw::c_int)
+        };
         if status != 0 {
             // password is still all-zero from the array initialiser; no
             // sensitive bytes to scrub on this path.
             return Err(BatonError::from_irods_with_context(
                 status,
-                "obfGetPw failed (is .irodsA present?)",
+                "shim_get_password failed (is .irodsA present?)",
             ));
         }
 
-        let status = unsafe {
-            ffi::clientLoginWithPassword(self.conn, password.as_mut_ptr())
-        };
+        let status = unsafe { ffi::shim_login_password(self.conn, password.as_ptr()) };
 
         // Zero the password buffer regardless of the login outcome.
         // Stack arrays aren't auto-zeroed at function exit, so leaving
@@ -412,10 +406,10 @@ impl RodsConnection {
 impl Drop for RodsConnection {
     fn drop(&mut self) {
         if !self.conn.is_null() {
-            // rcDisconnect returns a status code, but there's nothing useful
-            // to do with it here — we're on the destruction path.
+            // shim_close returns a status code, but there's nothing
+            // useful to do with it here — we're on the destruction path.
             unsafe {
-                ffi::rcDisconnect(self.conn);
+                ffi::shim_close(self.conn);
             }
             self.conn = std::ptr::null_mut();
         }
