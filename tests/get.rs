@@ -10,6 +10,7 @@
 //! server. Drop guards run regardless of assertion outcome so the
 //! tests stay idempotent.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use base64::engine::general_purpose;
@@ -26,6 +27,16 @@ struct IrodsCleanup(String);
 impl Drop for IrodsCleanup {
     fn drop(&mut self) {
         let _ = Command::new("irm").args(["-r", "-f", &self.0]).status();
+    }
+}
+
+/// Drop guard for a local file written by `--save` mode tests. Errors
+/// are swallowed — the file may not exist if the test panicked before
+/// the save completed.
+struct LocalCleanup(PathBuf);
+impl Drop for LocalCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -578,5 +589,260 @@ fn get_on_collection_is_error() {
         result.is_err(),
         "expected error when calling get_one on a collection, got {:?}",
         result
+    );
+}
+
+// --- --save mode --------------------------------------------------------------
+
+#[test]
+fn get_save_writes_bytes_to_local_file() {
+    // Round-trip via --save: iput a known file, get_one in save mode
+    // with a destination directory, confirm the bytes hit disk under
+    // <directory>/<data_object>.
+    let upload_local = "/tmp/baton_rs_get_save_upload";
+    let download_dir = "/tmp/baton_rs_get_save_dl";
+    let content: &[u8] = b"save mode round trip";
+    std::fs::write(upload_local, content).expect("write source");
+    std::fs::create_dir_all(download_dir).expect("create download dir");
+    let download_local = PathBuf::from(format!("{}/baton_rs_get_save_obj", download_dir));
+    let _local_cleanup = LocalCleanup(download_local.clone());
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_get_save_obj";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(upload_local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(download_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = GetOptions { save: true };
+    let output = get_one(&mut conn, input, &opts).expect("get_one --save");
+
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    assert!(
+        d.data.is_none(),
+        "--save mode should not populate inline `data`; got {:?}",
+        d.data
+    );
+    assert_eq!(
+        d.directory.as_deref(),
+        Some(download_dir),
+        "--save should echo the input `directory` field on the output"
+    );
+
+    let written = std::fs::read(&download_local).expect("read local copy");
+    assert_eq!(
+        written, content,
+        "byte mismatch in --save round-trip; local file content diverges from upload"
+    );
+}
+
+#[test]
+fn get_save_streams_multi_chunk_payload() {
+    // ~200 KiB exercises the chunked-write path through ~3 read
+    // iterations. A single-chunk test wouldn't catch a bug where the
+    // streaming-write path lost bytes between chunks.
+    let upload_local = "/tmp/baton_rs_get_save_multi_upload";
+    let download_dir = "/tmp/baton_rs_get_save_multi_dl";
+    let content: Vec<u8> = (0u8..=255u8).cycle().take(200 * 1024).collect();
+    std::fs::write(upload_local, &content).expect("write source");
+    std::fs::create_dir_all(download_dir).expect("create download dir");
+    let data_object = "baton_rs_get_save_multi_obj";
+    let download_local = PathBuf::from(format!("{}/{}", download_dir, data_object));
+    let _local_cleanup = LocalCleanup(download_local.clone());
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(upload_local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(download_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = GetOptions { save: true };
+    get_one(&mut conn, input, &opts).expect("get_one --save");
+
+    let written = std::fs::read(&download_local).expect("read local copy");
+    assert_eq!(written.len(), content.len(), "length mismatch");
+    assert!(
+        written == content,
+        "byte mismatch in --save multi-chunk round-trip"
+    );
+}
+
+#[test]
+fn get_save_errors_when_directory_missing_from_input() {
+    // --save with no `directory` field on the input: per-input error,
+    // stream continues. Driving get_one_annotated rather than get_one
+    // confirms the error annotates in band rather than aborting.
+    let local = "/tmp/baton_rs_get_save_no_dir";
+    std::fs::write(local, b"x").expect("write");
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_get_save_no_dir";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = GetOptions { save: true };
+    let output = get_one_annotated(&mut conn, input, &opts);
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    let err = d
+        .error
+        .as_ref()
+        .expect("expected error annotation when directory missing");
+    assert!(
+        err.message.contains("directory"),
+        "error message should mention the missing directory field, got {:?}",
+        err
+    );
+}
+
+#[test]
+fn get_save_errors_when_destination_directory_does_not_exist() {
+    // Destination directory that doesn't exist on the local filesystem
+    // → File::create fails. Surface as an annotated error rather than
+    // panicking; baton-get must NOT auto-create destinations (matches
+    // upstream baton's behaviour).
+    let local = "/tmp/baton_rs_get_save_bad_dir";
+    std::fs::write(local, b"x").expect("write");
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_get_save_bad_dir";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some("/tmp/baton_rs_does_not_exist_xxxxxxxx".to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = GetOptions { save: true };
+    let output = get_one_annotated(&mut conn, input, &opts);
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    assert!(
+        d.error.is_some(),
+        "expected error annotation when destination directory missing, got {:?}",
+        d
+    );
+}
+
+#[test]
+fn get_save_overwrites_existing_local_file() {
+    // The save path uses File::create, which truncates. A pre-existing
+    // local file at the destination must be overwritten with the
+    // current iRODS content rather than appended to or refused.
+    let upload_local = "/tmp/baton_rs_get_save_overwrite_upload";
+    let download_dir = "/tmp/baton_rs_get_save_overwrite_dl";
+    let new_content: &[u8] = b"new content";
+    std::fs::write(upload_local, new_content).expect("write source");
+    std::fs::create_dir_all(download_dir).expect("create download dir");
+
+    let data_object = "baton_rs_get_save_overwrite_obj";
+    let download_local = PathBuf::from(format!("{}/{}", download_dir, data_object));
+    // Pre-seed the destination with stale content longer than the new
+    // payload so a non-truncating write would leave a trailing tail.
+    std::fs::write(
+        &download_local,
+        b"stale content much longer than the new payload",
+    )
+    .expect("write stale");
+    let _local_cleanup = LocalCleanup(download_local.clone());
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(upload_local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(download_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let opts = GetOptions { save: true };
+    get_one(&mut conn, input, &opts).expect("get_one --save with overwrite");
+
+    let written = std::fs::read(&download_local).expect("read local copy");
+    assert_eq!(
+        written, new_content,
+        "stale content should have been replaced wholesale, not appended/preserved"
     );
 }
