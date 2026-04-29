@@ -29,6 +29,7 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 - **Logging:** `tracing` + `tracing-subscriber`, `--verbose` → DEBUG, `--silent` → ERROR (wiring added in Session 3)
 - **JSON key ordering:** serde default; structural comparison in compatibility tests (not byte-for-byte)
 - **Short-form JSON aliases:** types accept both long (`attribute`/`value`/`units`) and short (`a`/`v`/`u`) forms via serde `alias`; emit long form on serialise
+- **iRODS FFI strategy:** all iRODS API calls go through `shim/ffi_shim.{c,h}` (compiled by `cc` into a static library and linked alongside `irods_client` / `irods_common`). The Rust crate sees only the hand-written mirror in `src/ffi.rs` — no bindgen, no libclang. Adopted in Session 4.5 (issue #9). Adding a new iRODS API means declaring it in both `shim/ffi_shim.h` and `src/ffi.rs`, and writing the implementation in `shim/ffi_shim.c`.
 
 ---
 
@@ -241,6 +242,51 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ---
 
+### Session 4.5 — C shim and libclang isolation (issue #9)
+
+**Status:** completed on 2026-04-29
+
+**Goal:** Replace the bindgen-against-iRODS-headers approach with a hand-written FFI mirror of a thin C shim, so libclang isn't in the build path at all and the iRODS 4.2.7 CI entry can return to strict mode.
+
+**Completed (single branch `feat/session-4.5-c-shim`, ~10 commits):**
+- **`shim/ffi_shim.{h,c}`** — version-agnostic C surface over the iRODS client. Opaque types (`shim_rods_conn_t`, `shim_query_t`, `shim_query_result_t`), POD distillations (`shim_env_t`, `shim_stat_t`), the symbolic catalog-column enum (`shim_col_t`, 24 values), and 17 functions covering connect / login / stat / genQuery / AVU mod / error name. The shim's `.c` is the only translation unit that `#include`s `<rodsClient.h>`.
+- **Hand-written `src/ffi.rs`** — directly mirrors `shim/ffi_shim.h`. Replaces the bindgen pipeline entirely. With this in place, libclang is no longer invoked at any point in the build.
+- **`build.rs`** — bindgen removed; only `cc` compiles the shim into `libbaton_rs_shim.a` and emits link directives for `irods_client` / `irods_common`. `wrapper.h` deleted.
+- **`Cargo.toml`** — `bindgen` build-dependency dropped. Only `cc` remains.
+- **Subsystem migrations (one commit per subsystem on the branch):**
+  - **Connection lifecycle.** `shim_open` / `shim_close` / `shim_get_env` replace `rcConnect` / `rcDisconnect` / `getRodsEnv`. `RodsConnection.conn` becomes `*mut shim_rods_conn`.
+  - **Auth.** `shim_get_password` / `shim_login_password` replace direct `obfGetPw` / `clientLoginWithPassword`. Password buffer zeroed on every return path now (was only on success).
+  - **Stat.** `shim_stat` builds the `dataObjInp_t`, calls `rcObjStat`, copies fields, and frees the iRODS allocation internally — Rust never sees `dataObjInp_t` / `rodsObjStat_t`.
+  - **General query.** Opaque builder + result. `GenQuery::new` / `add_select` / `add_where`, then `RodsConnection::query(&mut GenQuery)` returns `Vec<Vec<String>>`. Pagination and `CAT_NO_ROWS_FOUND` absorption live inside `shim_query_exec`.
+  - **Metamod.** `shim_mod_avu` takes the AVU pieces as named arguments and builds `modAVUMetadataInp_t` internally — Rust no longer reaches into `arg0..arg9`.
+  - **Error names.** `shim_error_name` wraps `rodsErrorName` (always passes NULL for the unused sub-error name).
+- **`docker/build.sh` / `.devcontainer/setup.sh`** — `libclang-dev` and `clang` apt installs removed. Both scripts also pin `irods_default_hash_scheme = MD5` in the iRODS environment so the 4.2.7 image's replResc children agree on checksum algorithm and don't mark replicas stale (issue #25).
+- **CI matrix** — 4.2.7's `experimental: true` flipped back to `false`. All three matrix entries (4.2.7, 4.3.4, 4.3.5) are strict and green.
+- **Defensive hardening (audit pass):**
+  - `shim_query_exec` now frees `*out` on the `CAT_NO_ROWS_FOUND` and `status < 0` paths if iRODS ever sets it — guards a future regression in the client lib.
+  - `login_from_auth_file` zeros the password buffer on every return path, including `shim_get_password` failure (was previously only after a successful login attempt).
+- **Test surface kept stable.** Every Session 2/3/4 integration test passes unchanged on all three iRODS versions. The `list_data_object_with_replicate` assertion was tightened from "r0 valid" to "all replicas valid" — strictly stronger than the original form, made possible by the issue #25 hash-scheme fix.
+
+**Deferred / known gaps:**
+- **iRODS 5.x in CI** still deferred to Session 8 — not in #9's scope.
+- **The `clientLogin` workaround (issue #10)** is unaffected — auth still goes through the legacy native path via `shim_login_password`.
+- **End-to-end test for `sql_escape`** with a single-quote in a path. The unit test in `src/operations/list.rs` covers the function in isolation; an end-to-end through genQuery would be incremental signal. Nice-to-have for Session 8 polish.
+
+**Decisions made:**
+- **Hand-written FFI rather than committed bindgen output.** Tried bindgen-with-narrow-allowlist first, but bindgen 0.71 / clang-sys 1.8.1 require libclang ≥ 5.0 at runtime (calls `clang_getTranslationUnitTargetInfo`) and the iRODS 4.2.7 CI image ships only 3.8. Even with the shim narrowing what bindgen would *parse*, bindgen still has to *run* — so removing it entirely was the only way to keep 4.2.7 strict. The shim's surface is small (17 functions) and stable, so manual upkeep is cheap.
+- **`shim_col_t` enum, not raw integers.** Catalog column indices live as a shim-side enum; the shim translates each value to the iRODS `COL_*` numeric at runtime. Keeps the iRODS macros (and the `<rodsGenQuery.h>` header that defines them) on the C side.
+- **Single branch, incremental subsystem migration.** Each subsystem moved behind the shim in its own commit, with the not-yet-migrated subsystems casting `*mut shim_rods_conn` back to `*mut rcComm_t` until their turn. Made each commit individually verifiable in the devcontainer.
+- **Issue #25 fix scope.** The 4.2.7 image's replResc divergence is a client-side configuration issue; pinning `irods_default_hash_scheme = MD5` in the client environment is sufficient — no upstream image change needed. (Confirmed with Keith.)
+- **`Cargo.lock` is still not tracked.** Surfaced during the audit; left alone pending an explicit decision next session. Convention says binary crates should commit it.
+
+**Open questions for next session (Session 5 — baton-get + baton-put):**
+- (carried from Session 4) Streaming MD5 verification — does iRODS expose an incremental hash API on the put path, or do we compute server-side after the put completes?
+- (carried from Session 4) Replicate handling: which replica's size to report when a data object has multiple replicas with different sizes (mid-replication state)?
+- (carried from Session 4) Long-running put/get gives `RodsConnection::reconnect` its first real consumer — wire `--connect-time` into the loop or leave it manual?
+- New: when a Session 5 operation needs an iRODS API the shim doesn't yet expose, the now-explicit pattern is: declare in `shim/ffi_shim.h`, implement in `shim/ffi_shim.c`, mirror in `src/ffi.rs`. No build-system changes required.
+
+---
+
 ### Session 5 — baton-get and baton-put
 
 **Status:** `<not started>`
@@ -349,3 +395,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-24` — Session 2 completed: iRODS FFI + RodsConnection (connect, login, reconnect). 4.2.7 flipped experimental (issue #9); auth bypasses clientLogin (issue #10).
 - `2026-04-27` — Session 3 completed across three branches: 3a (CLI harness + size/checksum + in-band errors), 3b (avu/acl/replicate/timestamp via rcGenQuery), 3c (contents + best-effort compat test). First real binary on the FFI substrate.
 - `2026-04-28` — Session 4 completed across three branches: 4a (extract enrich_with_metadata), 4b (baton-metamod via rcModAVUMetadata), 4c (baton-metaquery with single/multi-AVU + timestamp + ACL + scope). First binary that mutates iRODS state and first that uses the Operator enum from Session 1.
+- `2026-04-29` — Session 4.5 completed: C shim landed, bindgen and libclang dropped from the build entirely, iRODS 4.2.7 flipped back to strict (issue #9 closed). Issue #25 (4.2.7 replResc checksum-algorithm divergence) closed by pinning `irods_default_hash_scheme = MD5` in the client environment. New cross-cutting convention: every iRODS API call goes through `shim/ffi_shim.{c,h}` mirrored in `src/ffi.rs`.
