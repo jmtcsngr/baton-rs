@@ -289,9 +289,18 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 5 — baton-get and baton-put
 
-**Status:** `<not started>`
+**Status:** in progress (started 2026-04-29)
 
 **Goal:** Download (inline and `--save`) and upload with streaming MD5 verification. Replicate handling.
+
+**Plan:** split into 5a / 5b / 5c, mirroring Session 3 / 4.
+- **5a — operations skeleton + `baton-get` inline mode.** Read a data object end-to-end, base64-encode, return on the JSON output's `data` field. No `--save`, no put.
+- **5b — `baton-get --save` + `baton-put` (streaming MD5).** File-system I/O on both sides; client-side incremental MD5 on the put path; server-side checksum requested via `rcDataObjChksum`; `--checksum` (server only) and `--verify` (client+server compare) flags. Replicate-aware sizing: report the size of the highest-numbered *valid* replica.
+- **5c — `--connect-time` reconnect decision + finalise.** Decide once we can see realistic transfer durations whether to wire the time check into the put/get loop or leave it manual; finalise SESSIONS.md and the changelog.
+
+**Decisions fixed up front:**
+- **Streaming MD5 on put.** Compute MD5 client-side as bytes are streamed through `rcDataObjWrite`, request a server-side checksum via `rcDataObjChksum`, compare for `--verify`. For `--checksum`-only, skip the client-side hash. Avoids reading the input file twice.
+- **Replicate sizing rule.** Mirror upstream baton: report the size of the highest-numbered replica with `DATA_REPL_STATUS = 1` (a "good" replica). Decision captured in code in 5b alongside the implementation.
 
 **Completed:**
 - `<fill in>`
@@ -396,3 +405,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-27` — Session 3 completed across three branches: 3a (CLI harness + size/checksum + in-band errors), 3b (avu/acl/replicate/timestamp via rcGenQuery), 3c (contents + best-effort compat test). First real binary on the FFI substrate.
 - `2026-04-28` — Session 4 completed across three branches: 4a (extract enrich_with_metadata), 4b (baton-metamod via rcModAVUMetadata), 4c (baton-metaquery with single/multi-AVU + timestamp + ACL + scope). First binary that mutates iRODS state and first that uses the Operator enum from Session 1.
 - `2026-04-29` — Session 4.5 completed: C shim landed, bindgen and libclang dropped from the build entirely, iRODS 4.2.7 flipped back to strict (issue #9 closed). Issue #25 (4.2.7 replResc checksum-algorithm divergence) closed by pinning `irods_default_hash_scheme = MD5` in the client environment. New cross-cutting convention: every iRODS API call goes through `shim/ffi_shim.{c,h}` mirrored in `src/ffi.rs`.
+- `2026-04-29` — Session 5 started on branch `feat/session-5-get-put`. Split into 5a/5b/5c; up-front decisions on streaming MD5 (client-side on put) and replicate sizing (highest-numbered valid replica). `--connect-time` wiring deferred to 5c.
