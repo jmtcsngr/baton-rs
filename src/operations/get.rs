@@ -5,9 +5,15 @@
 
 //! `baton-get` logic: read a data object's bytes back to the caller.
 //!
-//! Inline mode (5a) base64-encodes the bytes and emits them on the
-//! output JSON's `data` field. `--save` file mode lands in 5b along
-//! with `baton-put`.
+//! Inline mode (default) base64-encodes the bytes and emits them on
+//! the output JSON's `data` field. `--save` file mode (5b) streams
+//! bytes directly to disk under the per-record `directory` and skips
+//! the inline `data` field — matches upstream baton's per-record
+//! save-destination convention.
+
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
 
 use base64::engine::general_purpose;
 use base64::Engine;
@@ -16,21 +22,33 @@ use crate::connection::{OpenMode, RodsConnection};
 use crate::error::BatonError;
 use crate::types::Target;
 
-/// Caller-controlled flags for [`get_one`]. Empty in 5a — `--save`
-/// lands in 5b. Keeping the struct in the signature now so 5b can
-/// extend it without churning callers.
+/// Caller-controlled flags for [`get_one`].
 #[derive(Debug, Default, Clone, Copy)]
-pub struct GetOptions {}
+pub struct GetOptions {
+    /// `--save` file mode. When `true`, [`get_one`] streams bytes from
+    /// iRODS to a local file under each input record's `directory`
+    /// field and leaves the `data` field unset on the output. When
+    /// `false`, the inline base64 path is used.
+    pub save: bool,
+}
 
 // 64 KiB is a moderate compromise: small enough that the per-call
 // memory cost is negligible for tiny files, large enough that the
 // rcDataObjRead overhead doesn't dominate for objects that span
-// multiple chunks. 5b will revisit when the streaming MD5 / file save
-// paths land — incremental hashing wants a stable chunk shape.
+// multiple chunks. Same chunk size for inline and save paths so
+// behaviour stays uniform; the save path additionally avoids the
+// O(file size) memory cost of accumulating into a single Vec.
 const READ_CHUNK_SIZE: usize = 64 * 1024;
 
-/// Read a single data object end-to-end and return it with the `data`
-/// field populated (base64-encoded bytes).
+/// Read a single data object end-to-end.
+///
+/// Inline mode (`opts.save == false`): bytes accumulated in memory,
+/// base64-encoded, returned on the output `data` field.
+///
+/// Save mode (`opts.save == true`): bytes streamed to
+/// `<input.directory>/<input.data_object>` on disk; `data` left
+/// unset on the output. The input record's `directory` field is
+/// required in this mode and is echoed unchanged on the output.
 ///
 /// Collections are an error: there's nothing to download for a
 /// collection in baton's data model. Upstream baton-get returns an
@@ -38,7 +56,7 @@ const READ_CHUNK_SIZE: usize = 64 * 1024;
 pub fn get_one(
     conn: &mut RodsConnection,
     target: Target,
-    _opts: &GetOptions,
+    opts: &GetOptions,
 ) -> Result<Target, BatonError> {
     let path = target.path();
     let mut data_obj = match target {
@@ -54,16 +72,47 @@ pub fn get_one(
         }
     };
 
-    let handle = conn.open_data_object(&path, OpenMode::Read)?;
-    let read_result = read_to_end(conn, handle);
-    // Best-effort close on both success and failure paths. A close
-    // failure on the success path is logged-but-ignored: the bytes are
-    // already in hand and there's nothing useful for the caller to do
-    // with a stale L1 descriptor.
-    let _ = conn.close_data_object(handle);
-    let bytes = read_result?;
+    if opts.save {
+        // The local destination is <directory>/<data_object>. iRODS
+        // never sees this path; the directory must exist on the local
+        // host before the call (baton itself doesn't auto-create).
+        let directory = data_obj.directory.as_deref().ok_or(BatonError {
+            code: -1,
+            message: "baton-get --save requires a `directory` field on each input record"
+                .to_string(),
+        })?;
+        let mut local_path = PathBuf::from(directory);
+        local_path.push(&data_obj.data_object);
 
-    data_obj.data = Some(general_purpose::STANDARD.encode(&bytes));
+        let mut file = File::create(&local_path).map_err(|e| BatonError {
+            code: -1,
+            message: format!("could not create local file {}: {}", local_path.display(), e),
+        })?;
+
+        let handle = conn.open_data_object(&path, OpenMode::Read)?;
+        let result = stream_to_writer(conn, handle, &mut file);
+        let _ = conn.close_data_object(handle);
+        result?;
+
+        // Ensure bytes hit the OS before we declare success. Without
+        // this, a concurrent reader (e.g. a downstream pipeline) could
+        // see a short file when --save returns.
+        file.sync_all().map_err(|e| BatonError {
+            code: -1,
+            message: format!("flushing local file {}: {}", local_path.display(), e),
+        })?;
+    } else {
+        let handle = conn.open_data_object(&path, OpenMode::Read)?;
+        let read_result = read_to_end(conn, handle);
+        // Best-effort close on both success and failure paths. A close
+        // failure on the success path is logged-but-ignored: the bytes
+        // are already in hand and there's nothing useful for the
+        // caller to do with a stale L1 descriptor.
+        let _ = conn.close_data_object(handle);
+        let bytes = read_result?;
+        data_obj.data = Some(general_purpose::STANDARD.encode(&bytes));
+    }
+
     Ok(Target::DataObject(data_obj))
 }
 
@@ -98,4 +147,26 @@ fn read_to_end(conn: &mut RodsConnection, handle: i32) -> Result<Vec<u8>, BatonE
         content.extend_from_slice(&buf[..n]);
     }
     Ok(content)
+}
+
+/// Stream the data object behind `handle` into `out`, chunk by chunk.
+/// Used by the `--save` path to avoid accumulating the entire object
+/// in memory before writing.
+fn stream_to_writer<W: Write>(
+    conn: &mut RodsConnection,
+    handle: i32,
+    out: &mut W,
+) -> Result<(), BatonError> {
+    let mut buf = vec![0u8; READ_CHUNK_SIZE];
+    loop {
+        let n = conn.read_data_object(handle, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n]).map_err(|e| BatonError {
+            code: -1,
+            message: format!("writing local file: {}", e),
+        })?;
+    }
+    Ok(())
 }

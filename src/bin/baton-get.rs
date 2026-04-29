@@ -5,10 +5,17 @@
 
 //! `baton-get` — download iRODS data objects.
 //!
-//! 5a wires inline mode only: each input line names a data object,
-//! and the output line is the same record with the bytes base64-encoded
-//! on the `data` field. `--save` (file mode) lands in 5b together with
-//! `baton-put` and the streaming MD5 verification logic.
+//! Inline mode (default): each input line names a data object, and
+//! the output line is the same record with the bytes base64-encoded
+//! on the `data` field.
+//!
+//! `--save` mode: streams bytes from iRODS into
+//! `<input.directory>/<input.data_object>` on the local filesystem
+//! and emits the input record back unchanged (no inline `data`).
+//! Each input record must include a `directory` field; missing
+//! directories surface as in-band per-record errors. The directory
+//! must already exist — baton-rs follows upstream baton in not
+//! auto-creating destinations.
 
 use std::io::{BufRead, Write};
 
@@ -19,8 +26,14 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "baton-get", about = "Download iRODS data objects (inline mode)")]
+#[command(name = "baton-get", about = "Download iRODS data objects")]
 struct Args {
+    /// Save bytes to `<directory>/<data_object>` on the local
+    /// filesystem instead of returning them inline as base64. Each
+    /// input record must include a `directory` field.
+    #[arg(long)]
+    save: bool,
+
     /// Verbose logging (DEBUG level).
     #[arg(short, long, conflicts_with = "silent")]
     verbose: bool,
@@ -31,6 +44,10 @@ struct Args {
 }
 
 impl Args {
+    fn to_options(&self) -> GetOptions {
+        GetOptions { save: self.save }
+    }
+
     fn log_level(&self) -> &'static str {
         if self.silent {
             "error"
@@ -55,7 +72,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(&args);
 
-    let opts = GetOptions::default();
+    let opts = args.to_options();
 
     let mut conn = RodsConnection::connect_from_env().context("connecting to iRODS")?;
     conn.login_from_auth_file().context("authenticating")?;
