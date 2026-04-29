@@ -170,6 +170,77 @@ fn get_inline_round_trips_multi_chunk_data_object() {
 }
 
 #[test]
+fn get_inline_round_trips_thirty_megabyte_data_object() {
+    // Stress the read loop with a payload many hundreds of chunks
+    // long. Catches off-by-one bugs in the chunk-length accounting and
+    // any silent truncation iRODS might apply at internal page
+    // boundaries. ~100 MB of transient local storage is expected:
+    // local file (30 MB) + iRODS replica (30 MB) + in-memory bytes
+    // (30 MB) + base64 string (~40 MB), only some of which coexist.
+    //
+    // Uses a cyclic 0..=255 pattern so the exact-equality assertion is
+    // deterministic across runs and any divergence is reproducible.
+    let local = "/tmp/baton_rs_get_30mb";
+    const PAYLOAD_LEN: usize = 30 * 1024 * 1024;
+    let pattern: Vec<u8> = (0u8..=255u8).cycle().take(PAYLOAD_LEN).collect();
+    std::fs::write(local, &pattern).expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_get_30mb";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let output = get_one(&mut conn, input, &GetOptions::default()).expect("get_one");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    let decoded = general_purpose::STANDARD
+        .decode(d.data.as_deref().expect("data field populated"))
+        .expect("base64 decode");
+
+    // assert_eq! on 30 MB Vec<u8> would dump the whole buffer to the
+    // test log on mismatch — useless and slow. Length first, then a
+    // bool comparison with a position-of-first-difference hint.
+    assert_eq!(decoded.len(), pattern.len(), "decoded length mismatch");
+    if decoded != pattern {
+        let pos = decoded
+            .iter()
+            .zip(pattern.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
+        let end = (pos + 16).min(decoded.len());
+        panic!(
+            "byte mismatch in 30 MB round-trip; first divergence at offset {pos}: \
+             decoded={:02x?} expected={:02x?}",
+            &decoded[pos..end],
+            &pattern[pos..end],
+        );
+    }
+
+    // Free the local copy ASAP — the in-memory pattern + decoded
+    // buffers still occupy ~60 MB until the function returns.
+    let _ = std::fs::remove_file(local);
+}
+
+#[test]
 fn get_annotated_error_for_missing_path() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
