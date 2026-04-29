@@ -154,6 +154,13 @@ pub struct DataObject {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub data: Option<String>,
 
+    /// Local destination directory for `baton-get --save`. Bytes go to
+    /// `<directory>/<data_object>` on disk rather than into the JSON
+    /// output's `data` field. Echoed on output records when present on
+    /// input — matches baton's per-record save-destination convention.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub directory: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub avus: Option<Vec<Avu>>,
 
@@ -308,6 +315,7 @@ impl MetamodInput {
                 size: None,
                 checksum: None,
                 data: None,
+                directory: None,
                 avus: None,
                 access: None,
                 replicates: None,
@@ -448,6 +456,17 @@ mod tests {
         let json = r#"{"collection":"/testZone/home/irods","data_object":"foo.txt","data":"aGVsbG8="}"#;
         let d: DataObject = serde_json::from_str(json).unwrap();
         assert_eq!(d.data.as_deref(), Some("aGVsbG8="));
+        assert_eq!(serde_json::to_string(&d).unwrap(), json);
+    }
+
+    #[test]
+    fn data_object_with_save_directory_round_trip() {
+        // baton-get --save reads the per-record `directory` field;
+        // the field is echoed back on the output unchanged so the
+        // caller can correlate input/output records by content.
+        let json = r#"{"collection":"/testZone/home/irods","data_object":"foo.txt","directory":"/tmp/baton_rs_save"}"#;
+        let d: DataObject = serde_json::from_str(json).unwrap();
+        assert_eq!(d.directory.as_deref(), Some("/tmp/baton_rs_save"));
         assert_eq!(serde_json::to_string(&d).unwrap(), json);
     }
 
@@ -619,6 +638,7 @@ mod tests {
             size: None,
             checksum: None,
             data: None,
+            directory: None,
             avus: None,
             access: None,
             replicates: None,
@@ -636,6 +656,7 @@ mod tests {
             size: None,
             checksum: None,
             data: None,
+            directory: None,
             avus: None,
             access: None,
             replicates: None,
@@ -708,6 +729,7 @@ mod tests {
             size: None,
             checksum: None,
             data: None,
+            directory: None,
             avus: None,
             access: None,
             replicates: None,
