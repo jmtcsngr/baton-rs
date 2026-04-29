@@ -17,7 +17,8 @@ cat > "$HOME/.irods/irods_environment.json" << 'EOF'
   "irods_user_name": "irods",
   "irods_zone_name": "testZone",
   "irods_home": "/testZone/home/irods",
-  "irods_default_resource": "replResc"
+  "irods_default_resource": "replResc",
+  "irods_default_hash_scheme": "MD5"
 }
 EOF
 nc -z -v irods-server 1247

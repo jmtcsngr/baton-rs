@@ -486,18 +486,17 @@ fn list_data_object_with_replicate() {
     assert!(!r0.resource.is_empty(), "resource set");
     assert!(!r0.location.is_empty(), "location set");
 
-    // At least one replica must be valid right after iput. We don't
-    // pin "replica 0 is the valid one" because the replResc layout
-    // varies across the CI matrix images: on the 4.3.x images
-    // replResc returns a single good replica (so r0 is valid), but
-    // on the 4.2.7 image replResc fans out to two children that
-    // record different checksum algorithms (SHA-2 vs MD5), so iRODS
-    // marks r0 stale and r1 good. The test is verifying our
-    // genQuery + parser pipeline, not a particular server policy —
-    // see the linked issue for the upstream image inconsistency.
+    // Every replica must be valid right after iput. This is stricter
+    // than the original "r0 is valid" form: on the 4.2.7 CI image
+    // replResc fans out to two children, and we need both of them
+    // good — that only holds if the client is configured to use a
+    // hash scheme the replication resource agrees with. The setup
+    // scripts (docker/build.sh, .devcontainer/setup.sh) pin
+    // `irods_default_hash_scheme` to MD5 so the children's checksums
+    // match and neither replica is marked stale.
     assert!(
-        replicates.iter().any(|r| r.valid),
-        "expected at least one valid replica right after iput, got {:?}",
+        replicates.iter().all(|r| r.valid),
+        "expected every replica valid right after iput, got {:?}",
         replicates,
     );
 }
