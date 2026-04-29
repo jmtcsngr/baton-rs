@@ -275,6 +275,279 @@ fn get_annotated_error_for_missing_path() {
 }
 
 #[test]
+fn get_inline_handles_sequential_calls_on_same_connection() {
+    // The baton-get binary keeps a single RodsConnection alive across
+    // every input line in the NDJSON stream. Pin that
+    // open → read → close leaves no residual state on the connection:
+    // a second get on a different object after the first must produce
+    // the right bytes — not the previous object's, not a truncated
+    // copy, not an iRODS error.
+    let local_a = "/tmp/baton_rs_get_seq_a";
+    let local_b = "/tmp/baton_rs_get_seq_b";
+    let bytes_a: &[u8] = b"first object content";
+    let bytes_b: &[u8] = b"second OBJECT content";
+    std::fs::write(local_a, bytes_a).expect("write a");
+    std::fs::write(local_b, bytes_b).expect("write b");
+
+    let remote_coll = "/testZone/home/irods";
+    let object_a = "baton_rs_get_seq_a";
+    let object_b = "baton_rs_get_seq_b";
+    let remote_a = format!("{}/{}", remote_coll, object_a);
+    let remote_b = format!("{}/{}", remote_coll, object_b);
+    iput(local_a, &remote_a);
+    let _cleanup_a = IrodsCleanup(remote_a.clone());
+    iput(local_b, &remote_b);
+    let _cleanup_b = IrodsCleanup(remote_b.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let make_input = |name: &str| -> Target {
+        Target::DataObject(DataObject {
+            collection: remote_coll.to_string(),
+            data_object: name.to_string(),
+            size: None,
+            checksum: None,
+            data: None,
+            avus: None,
+            access: None,
+            replicates: None,
+            timestamps: None,
+            error: None,
+        })
+    };
+
+    let out_a = get_one(&mut conn, make_input(object_a), &GetOptions::default())
+        .expect("get_one a");
+    let out_b = get_one(&mut conn, make_input(object_b), &GetOptions::default())
+        .expect("get_one b");
+
+    let extract = |t: &Target| -> Vec<u8> {
+        match t {
+            Target::DataObject(d) => general_purpose::STANDARD
+                .decode(d.data.as_deref().expect("data"))
+                .expect("base64"),
+            other => panic!("expected DataObject, got {:?}", other),
+        }
+    };
+    assert_eq!(extract(&out_a), bytes_a);
+    assert_eq!(extract(&out_b), bytes_b);
+}
+
+#[test]
+fn get_inline_recovers_from_error_on_same_connection() {
+    // The annotated wrapper must not poison the connection after a
+    // per-input failure. Pin: get_one_annotated on a missing path
+    // (annotates an error), followed by get_one on a real path
+    // (succeeds), all on the same RodsConnection. This is the actual
+    // contract the NDJSON loop in baton-get relies on — without it,
+    // the first bad input would silently break every subsequent line.
+    let local = "/tmp/baton_rs_get_recover";
+    let content: &[u8] = b"recovered ok";
+    std::fs::write(local, content).expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_get_recover";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let bad_input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: "definitely_not_here_for_recovery_check".to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let bad_out = get_one_annotated(&mut conn, bad_input, &GetOptions::default());
+    let bad_d = match bad_out {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    assert!(
+        bad_d.error.is_some(),
+        "expected error annotation on missing path, got {:?}",
+        bad_d
+    );
+
+    // Same connection, real path now. If the previous failure leaked
+    // L1 descriptor / open-state into the connection, this would
+    // either error or return wrong bytes.
+    let good_input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let good_out = get_one(&mut conn, good_input, &GetOptions::default())
+        .expect("get_one after annotated error on same connection");
+    let good_d = match good_out {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    let decoded = general_purpose::STANDARD
+        .decode(good_d.data.as_deref().expect("data field populated"))
+        .expect("base64 decode");
+    assert_eq!(decoded, content);
+}
+
+// READ_CHUNK_SIZE is a private const inside operations::get (64 KiB
+// at the time of writing). The boundary tests below pin the read-loop
+// behaviour at exactly that size, so if the implementation chunk size
+// changes, this constant — and the three tests below — need updating.
+const TEST_READ_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Test helper: stage `payload` via iput, get_one it back, base64-decode,
+/// assert byte-for-byte equality. Length-then-bool comparison so a
+/// mismatch doesn't dump megabytes of debug output.
+fn round_trip_payload(name: &str, payload: &[u8]) {
+    let local = format!("/tmp/baton_rs_get_{}", name);
+    std::fs::write(&local, payload).expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = format!("baton_rs_get_{}", name);
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(&local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.clone(),
+        size: None,
+        checksum: None,
+        data: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let output = get_one(&mut conn, input, &GetOptions::default()).expect("get_one");
+    let decoded = match output {
+        Target::DataObject(d) => general_purpose::STANDARD
+            .decode(d.data.as_deref().expect("data field populated"))
+            .expect("base64 decode"),
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    assert_eq!(
+        decoded.len(),
+        payload.len(),
+        "decoded length mismatch for {}",
+        name
+    );
+    assert!(decoded == *payload, "byte content mismatch for {}", name);
+}
+
+#[test]
+fn get_inline_chunk_boundary_minus_one() {
+    // Buffer is bigger than the file: the first read returns a short
+    // count (file size < buffer size) and the second returns 0. A
+    // "stop on EOF only when the previous read filled the buffer" bug
+    // would over-read here.
+    let payload: Vec<u8> = (0u8..=255u8)
+        .cycle()
+        .take(TEST_READ_CHUNK_SIZE - 1)
+        .collect();
+    round_trip_payload("boundary_minus_one", &payload);
+}
+
+#[test]
+fn get_inline_chunk_boundary_exact() {
+    // File size equals buffer size: one full read followed by an
+    // explicit zero-byte EOF read. A "stop when n < buf.len()" bug
+    // would be silent here because the first read fills the buffer
+    // exactly — the loop would still continue (correctly) but the
+    // termination only ever happens on the explicit EOF read.
+    let payload: Vec<u8> = (0u8..=255u8).cycle().take(TEST_READ_CHUNK_SIZE).collect();
+    round_trip_payload("boundary_exact", &payload);
+}
+
+#[test]
+fn get_inline_chunk_boundary_plus_one() {
+    // File size = buffer size + 1: one full read, then a one-byte
+    // partial read, then EOF. Most likely place for an off-by-one in
+    // the partial-read accounting — a "treat partial as EOF" bug
+    // would drop the trailing byte.
+    let payload: Vec<u8> = (0u8..=255u8)
+        .cycle()
+        .take(TEST_READ_CHUNK_SIZE + 1)
+        .collect();
+    round_trip_payload("boundary_plus_one", &payload);
+}
+
+#[test]
+fn get_inline_round_trips_path_with_special_characters() {
+    // Path bytes flow caller → CString → rcDataObjOpen → iRODS catalog
+    // → reverse on rcDataObjRead. The metamod tests cover non-ASCII
+    // *values*; this pins non-ASCII / single-quote handling in *paths*
+    // for the read side. No sql_escape involved (genQuery isn't called
+    // by get_one), so the worry is byte-level integrity through the
+    // FFI rather than catalog-query injection.
+    let local = "/tmp/baton_rs_get_special_path";
+    let content: &[u8] = b"path-special content";
+    std::fs::write(local, content).expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    // Single quote + accented characters. The em-dash is left out
+    // here — accented Latin and the apostrophe are the high-value
+    // cases for path-byte-integrity, and avoiding additional
+    // characters keeps the failure mode unambiguous if iRODS ever
+    // tightens path validation.
+    let data_object = "O'Brien_résumé.txt";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+
+    let output = get_one(&mut conn, input, &GetOptions::default())
+        .expect("get_one with special characters in path");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    let decoded = general_purpose::STANDARD
+        .decode(d.data.as_deref().expect("data field populated"))
+        .expect("base64 decode");
+    assert_eq!(decoded, content);
+    assert_eq!(
+        d.data_object, data_object,
+        "data_object name should round-trip exactly through get_one"
+    );
+}
+
+#[test]
 fn get_on_collection_is_error() {
     // baton-get is a data-object operation; passing a collection
     // surfaces as an error rather than (e.g.) an empty success.
