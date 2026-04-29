@@ -111,6 +111,7 @@ pub const SHIM_COL_COLL_ACCESS_NAME: shim_col_t = 24;
 
 pub type shim_open_mode_t = c_uint;
 pub const SHIM_OPEN_READ: shim_open_mode_t = 1;
+pub const SHIM_OPEN_WRITE: shim_open_mode_t = 2;
 
 // ---- Function declarations --------------------------------------------------
 
@@ -176,6 +177,13 @@ extern "C" {
         conn: *mut shim_rods_conn_t,
         handle: c_int,
         buf: *mut c_void,
+        len: c_int,
+    ) -> c_int;
+
+    pub fn shim_data_obj_write(
+        conn: *mut shim_rods_conn_t,
+        handle: c_int,
+        buf: *const c_void,
         len: c_int,
     ) -> c_int;
 

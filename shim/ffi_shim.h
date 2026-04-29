@@ -200,13 +200,18 @@ void shim_query_result_free(shim_query_result_t *r);
 
 // ---- Data object read/write -------------------------------------------------
 //
-// Stream a data object's bytes between iRODS and the caller. `baton-get`
-// uses the read path; `baton-put` (Session 5b) will add the matching
-// write helpers. Handles are int-sized iRODS L1 descriptors, returned
-// from open and consumed by the per-handle read/write/close calls.
+// Stream a data object's bytes between iRODS and the caller. Handles
+// are int-sized iRODS L1 descriptors, returned from open and consumed
+// by the per-handle read/write/close calls.
+//
+// SHIM_OPEN_WRITE maps to `O_WRONLY | O_CREAT | O_TRUNC` — overwrite-
+// on-collision, which matches `baton-put`'s default and `iput -f`'s
+// behaviour. A no-overwrite mode would land alongside whichever future
+// session first needs it.
 
 typedef enum {
-    SHIM_OPEN_READ = 1,  // O_RDONLY
+    SHIM_OPEN_READ  = 1,  // O_RDONLY
+    SHIM_OPEN_WRITE = 2,  // O_WRONLY | O_CREAT | O_TRUNC
 } shim_open_mode_t;
 
 // Open a data object. Returns a non-negative iRODS handle on success;
@@ -223,6 +228,18 @@ int shim_data_obj_read(
     shim_rods_conn_t *conn,
     int               handle,
     void             *buf,
+    int               len);
+
+// Write `len` bytes from `buf` to `handle`. Returns the number of
+// bytes accepted (typically `len`) on success, or the iRODS error
+// code on failure (negative). iRODS does not perform short writes in
+// the way POSIX `write(2)` can, but callers should still treat a
+// non-error short return as a partial write and re-issue for the
+// remainder.
+int shim_data_obj_write(
+    shim_rods_conn_t *conn,
+    int               handle,
+    const void       *buf,
     int               len);
 
 // Close `handle`. Returns 0 on success or the iRODS error code.

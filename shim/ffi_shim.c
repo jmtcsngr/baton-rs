@@ -383,6 +383,10 @@ int shim_data_obj_open(
     case SHIM_OPEN_READ:
         inp.openFlags = O_RDONLY;
         break;
+    case SHIM_OPEN_WRITE:
+        // Overwrite-on-collision matches `baton-put` and `iput -f`.
+        inp.openFlags = O_WRONLY | O_CREAT | O_TRUNC;
+        break;
     default:
         return -1;
     }
@@ -409,6 +413,30 @@ int shim_data_obj_read(
     out.len = len;
 
     return rcDataObjRead((rcComm_t *)conn, &inp, &out);
+}
+
+int shim_data_obj_write(
+    shim_rods_conn_t *conn,
+    int               handle,
+    const void       *buf,
+    int               len)
+{
+    if (!conn || !buf || len <= 0 || handle < 0) return -1;
+
+    openedDataObjInp_t inp;
+    memset(&inp, 0, sizeof(inp));
+    inp.l1descInx = handle;
+    inp.len = len;
+
+    bytesBuf_t in;
+    memset(&in, 0, sizeof(in));
+    // rcDataObjWrite reads from `buf` and does not modify it; the
+    // const-cast is safe because the iRODS struct uses a non-const
+    // pointer for legacy reasons.
+    in.buf = (void *)buf;
+    in.len = len;
+
+    return rcDataObjWrite((rcComm_t *)conn, &inp, &in);
 }
 
 int shim_data_obj_close(shim_rods_conn_t *conn, int handle) {
