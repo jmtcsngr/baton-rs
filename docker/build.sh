@@ -8,6 +8,14 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 # Configure iRODS client. "irods-server" is the service container name,
 # resolvable via the shared Docker network.
+#
+# `irods_default_hash_scheme = MD5` is required for the 4.2.7 matrix
+# entry: that image's `replResc` has two children, and if the client
+# defaults to a different hash than what the replication resource
+# uses, iput's checksum disagrees with the recomputed checksum on one
+# replica and iRODS marks it stale. Pinning the client to MD5 keeps
+# every replica valid right after iput across all matrix entries.
+# See issue #25.
 export HOME="${HOME:-/root}"
 mkdir -p "$HOME/.irods"
 cat > "$HOME/.irods/irods_environment.json" << 'EOF'

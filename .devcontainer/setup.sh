@@ -12,6 +12,10 @@ until nc -z localhost 1247 2>/dev/null; do sleep 2; done
 sleep 5
 echo "iRODS ready."
 
+# `irods_default_hash_scheme = MD5` keeps the client aligned with the
+# 4.2.7 image's replResc children — without it, one replica gets
+# marked stale right after iput because of a checksum-algorithm
+# mismatch. Same setting as in `docker/build.sh`. See issue #25.
 mkdir -p "$HOME/.irods"
 cat > "$HOME/.irods/irods_environment.json" << 'EOF'
 {
