@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install libclang (required by bindgen for FFI generation — Session 2 onward).
-# The `clang` driver is installed alongside libclang-dev so libclang can locate
-# its own resource directory (fixes "'stddef.h' file not found" on older bases).
-sudo apt-get update -y
-sudo apt-get install -y --no-install-recommends libclang-dev clang
-
 # Start a local iRODS server sidecar
 docker run -d --name irods-server \
   -p 1247:1247 \
@@ -18,6 +12,10 @@ until nc -z localhost 1247 2>/dev/null; do sleep 2; done
 sleep 5
 echo "iRODS ready."
 
+# `irods_default_hash_scheme = MD5` keeps the client aligned with the
+# 4.2.7 image's replResc children — without it, one replica gets
+# marked stale right after iput because of a checksum-algorithm
+# mismatch. Same setting as in `docker/build.sh`. See issue #25.
 mkdir -p "$HOME/.irods"
 cat > "$HOME/.irods/irods_environment.json" << 'EOF'
 {
@@ -26,7 +24,8 @@ cat > "$HOME/.irods/irods_environment.json" << 'EOF'
   "irods_user_name": "irods",
   "irods_zone_name": "testZone",
   "irods_home": "/testZone/home/irods",
-  "irods_default_resource": "replResc"
+  "irods_default_resource": "replResc",
+  "irods_default_hash_scheme": "MD5"
 }
 EOF
 echo "irods" | script -q -c "iinit" /dev/null || true

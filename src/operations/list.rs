@@ -10,10 +10,7 @@
 //! helpers shared with `baton-metaquery` (Session 4c) via
 //! [`enrich_with_metadata`].
 
-use std::ffi::CString;
-use std::mem::MaybeUninit;
-
-use crate::connection::RodsConnection;
+use crate::connection::{GenQuery, RodsConnection};
 use crate::error::BatonError;
 use crate::ffi;
 use crate::types::{Acl, AclLevel, Avu, Collection, DataObject, Item, Replicate, Target, Timestamp};
@@ -154,14 +151,9 @@ pub fn list_one(
 
 // --- catalog query helpers ----------------------------------------------------
 //
-// These are also used by `crate::operations::metaquery`, hence pub(crate).
-// They stay here rather than moving to a shared module so the per-flag
-// fetchers below can keep using them with no import churn.
-
-/// Default `maxRows` for our catalog queries — picks up most realistic
-/// per-object metadata sets in one round trip; pagination via `query()`
-/// handles the rest transparently.
-pub(crate) const QUERY_PAGE_SIZE: i32 = 500;
+// `sql_escape` is shared with `crate::operations::metaquery`, hence
+// pub(crate). The query builder itself ([`GenQuery`]) lives in
+// `crate::connection` so its lifecycle stays next to `RodsConnection`.
 
 /// Escape single quotes for inclusion in a genQuery WHERE-clause literal.
 ///
@@ -182,53 +174,6 @@ pub(crate) fn sql_escape(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Initialise a zeroed `genQueryInp_t` with the standard page size.
-/// Caller is responsible for `clearGenQueryInp` after using it.
-pub(crate) fn new_query_inp() -> MaybeUninit<ffi::genQueryInp_t> {
-    let mut inp = MaybeUninit::<ffi::genQueryInp_t>::zeroed();
-    // SAFETY: the zeroed struct satisfies all field-init requirements;
-    // setting maxRows is the only mutation we need before query().
-    unsafe { inp.assume_init_mut().maxRows = QUERY_PAGE_SIZE };
-    inp
-}
-
-/// Add `col` to the SELECT list of `inp` (no aggregation).
-pub(crate) fn add_select(inp: &mut ffi::genQueryInp_t, col: i32) {
-    unsafe { ffi::addInxIval(&mut inp.selectInp, col, 0) };
-}
-
-/// Add a WHERE condition to `inp`. `condition` is the operator + literal
-/// the way iRODS's genQuery parser wants it, e.g. `"= '/testZone/home/irods'"`.
-pub(crate) fn add_where(
-    inp: &mut ffi::genQueryInp_t,
-    col: i32,
-    condition: &str,
-) -> Result<(), BatonError> {
-    let c = CString::new(condition).map_err(|_| BatonError {
-        code: -1,
-        message: "WHERE condition contains interior NUL".to_string(),
-    })?;
-    // iRODS's addInxVal strdup's the value, so it's safe to drop `c` here.
-    unsafe { ffi::addInxVal(&mut inp.sqlCondInp, col, c.as_ptr()) };
-    Ok(())
-}
-
-/// Run a populated input and always clear it before returning, regardless
-/// of whether the query succeeded — `clearGenQueryInp` frees the
-/// strdup'd condition / select buffers.
-///
-/// iRODS declares `clearGenQueryInp` with a generic `void *` parameter
-/// (it shares the signature with other `clearXxx` helpers). bindgen
-/// reflects that faithfully; we cast through `*mut _` here.
-pub(crate) fn run_query(
-    conn: &mut RodsConnection,
-    inp: &mut ffi::genQueryInp_t,
-) -> Result<Vec<Vec<String>>, BatonError> {
-    let result = conn.query(inp);
-    unsafe { ffi::clearGenQueryInp(inp as *mut _ as *mut std::os::raw::c_void) };
-    result
-}
-
 // --- per-flag fetchers --------------------------------------------------------
 
 /// Fetch the AVUs attached to a target.
@@ -237,48 +182,44 @@ pub(crate) fn run_query(
 /// `COLL_NAME` and `DATA_NAME` in the WHERE clause; collections use the
 /// `META_COLL_*` columns and only need `COLL_NAME`.
 fn fetch_avus(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Avu>, BatonError> {
-    let mut inp = new_query_inp();
-    let inp_ref = unsafe { inp.assume_init_mut() };
+    let mut q = GenQuery::new();
 
     let (col_attr, col_value, col_units) = match target {
         Target::DataObject(_) => (
-            ffi::COL_META_DATA_ATTR_NAME as i32,
-            ffi::COL_META_DATA_ATTR_VALUE as i32,
-            ffi::COL_META_DATA_ATTR_UNITS as i32,
+            ffi::SHIM_COL_META_DATA_ATTR_NAME,
+            ffi::SHIM_COL_META_DATA_ATTR_VALUE,
+            ffi::SHIM_COL_META_DATA_ATTR_UNITS,
         ),
         Target::Collection(_) => (
-            ffi::COL_META_COLL_ATTR_NAME as i32,
-            ffi::COL_META_COLL_ATTR_VALUE as i32,
-            ffi::COL_META_COLL_ATTR_UNITS as i32,
+            ffi::SHIM_COL_META_COLL_ATTR_NAME,
+            ffi::SHIM_COL_META_COLL_ATTR_VALUE,
+            ffi::SHIM_COL_META_COLL_ATTR_UNITS,
         ),
     };
-    add_select(inp_ref, col_attr);
-    add_select(inp_ref, col_value);
-    add_select(inp_ref, col_units);
+    q.add_select(col_attr);
+    q.add_select(col_value);
+    q.add_select(col_units);
 
     match target {
         Target::DataObject(d) => {
-            add_where(
-                inp_ref,
-                ffi::COL_COLL_NAME as i32,
+            q.add_where(
+                ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&d.collection)),
             )?;
-            add_where(
-                inp_ref,
-                ffi::COL_DATA_NAME as i32,
+            q.add_where(
+                ffi::SHIM_COL_DATA_NAME,
                 &format!("= '{}'", sql_escape(&d.data_object)),
             )?;
         }
         Target::Collection(c) => {
-            add_where(
-                inp_ref,
-                ffi::COL_COLL_NAME as i32,
+            q.add_where(
+                ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&c.collection)),
             )?;
         }
     }
 
-    let rows = run_query(conn, inp_ref)?;
+    let rows = conn.query(&mut q)?;
 
     Ok(rows
         .into_iter()
@@ -315,48 +256,44 @@ fn fetch_avus(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Avu>, Ba
 /// path, so on a collection input they yield zero rows. baton's own
 /// source uses the same split.
 fn fetch_acl(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Acl>, BatonError> {
-    let mut inp = new_query_inp();
-    let inp_ref = unsafe { inp.assume_init_mut() };
+    let mut q = GenQuery::new();
 
     let (col_user_name, col_user_zone, col_access_name) = match target {
         Target::DataObject(_) => (
-            ffi::COL_USER_NAME as i32,
-            ffi::COL_USER_ZONE as i32,
-            ffi::COL_DATA_ACCESS_NAME as i32,
+            ffi::SHIM_COL_USER_NAME,
+            ffi::SHIM_COL_USER_ZONE,
+            ffi::SHIM_COL_DATA_ACCESS_NAME,
         ),
         Target::Collection(_) => (
-            ffi::COL_COLL_USER_NAME as i32,
-            ffi::COL_COLL_USER_ZONE as i32,
-            ffi::COL_COLL_ACCESS_NAME as i32,
+            ffi::SHIM_COL_COLL_USER_NAME,
+            ffi::SHIM_COL_COLL_USER_ZONE,
+            ffi::SHIM_COL_COLL_ACCESS_NAME,
         ),
     };
-    add_select(inp_ref, col_user_name);
-    add_select(inp_ref, col_user_zone);
-    add_select(inp_ref, col_access_name);
+    q.add_select(col_user_name);
+    q.add_select(col_user_zone);
+    q.add_select(col_access_name);
 
     match target {
         Target::DataObject(d) => {
-            add_where(
-                inp_ref,
-                ffi::COL_COLL_NAME as i32,
+            q.add_where(
+                ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&d.collection)),
             )?;
-            add_where(
-                inp_ref,
-                ffi::COL_DATA_NAME as i32,
+            q.add_where(
+                ffi::SHIM_COL_DATA_NAME,
                 &format!("= '{}'", sql_escape(&d.data_object)),
             )?;
         }
         Target::Collection(c) => {
-            add_where(
-                inp_ref,
-                ffi::COL_COLL_NAME as i32,
+            q.add_where(
+                ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&c.collection)),
             )?;
         }
     }
 
-    let rows = run_query(conn, inp_ref)?;
+    let rows = conn.query(&mut q)?;
 
     rows.into_iter()
         .map(|row| {
@@ -392,32 +329,29 @@ fn fetch_replicates(
     conn: &mut RodsConnection,
     d: &DataObject,
 ) -> Result<Vec<Replicate>, BatonError> {
-    let mut inp = new_query_inp();
-    let inp_ref = unsafe { inp.assume_init_mut() };
+    let mut q = GenQuery::new();
 
     // Naming inconsistency note: iRODS 4.3.5's bindings expose this set
     // as a mix of long-form (COL_DATA_REPL_NUM) and short-form
     // (COL_D_DATA_CHECKSUM / COL_D_RESC_NAME / COL_D_REPL_STATUS) — not a
     // typo, that's actually how the headers are. Compiler "similar name"
     // hints were the source of truth.
-    add_select(inp_ref, ffi::COL_DATA_REPL_NUM as i32);
-    add_select(inp_ref, ffi::COL_D_DATA_CHECKSUM as i32);
-    add_select(inp_ref, ffi::COL_R_LOC as i32);
-    add_select(inp_ref, ffi::COL_D_RESC_NAME as i32);
-    add_select(inp_ref, ffi::COL_D_REPL_STATUS as i32);
+    q.add_select(ffi::SHIM_COL_DATA_REPL_NUM);
+    q.add_select(ffi::SHIM_COL_D_DATA_CHECKSUM);
+    q.add_select(ffi::SHIM_COL_R_LOC);
+    q.add_select(ffi::SHIM_COL_D_RESC_NAME);
+    q.add_select(ffi::SHIM_COL_D_REPL_STATUS);
 
-    add_where(
-        inp_ref,
-        ffi::COL_COLL_NAME as i32,
+    q.add_where(
+        ffi::SHIM_COL_COLL_NAME,
         &format!("= '{}'", sql_escape(&d.collection)),
     )?;
-    add_where(
-        inp_ref,
-        ffi::COL_DATA_NAME as i32,
+    q.add_where(
+        ffi::SHIM_COL_DATA_NAME,
         &format!("= '{}'", sql_escape(&d.data_object)),
     )?;
 
-    let rows = run_query(conn, inp_ref)?;
+    let rows = conn.query(&mut q)?;
 
     rows.into_iter()
         .map(|row| {
@@ -453,8 +387,7 @@ fn fetch_timestamps(
     conn: &mut RodsConnection,
     target: &Target,
 ) -> Result<Vec<Timestamp>, BatonError> {
-    let mut inp = new_query_inp();
-    let inp_ref = unsafe { inp.assume_init_mut() };
+    let mut q = GenQuery::new();
 
     let with_replicate = matches!(target, Target::DataObject(_));
 
@@ -462,32 +395,29 @@ fn fetch_timestamps(
         Target::DataObject(d) => {
             // Data object: per-replica timestamps. SELECT order matches the
             // row indices we read out below.
-            add_select(inp_ref, ffi::COL_D_CREATE_TIME as i32);
-            add_select(inp_ref, ffi::COL_D_MODIFY_TIME as i32);
-            add_select(inp_ref, ffi::COL_DATA_REPL_NUM as i32);
-            add_where(
-                inp_ref,
-                ffi::COL_COLL_NAME as i32,
+            q.add_select(ffi::SHIM_COL_D_CREATE_TIME);
+            q.add_select(ffi::SHIM_COL_D_MODIFY_TIME);
+            q.add_select(ffi::SHIM_COL_DATA_REPL_NUM);
+            q.add_where(
+                ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&d.collection)),
             )?;
-            add_where(
-                inp_ref,
-                ffi::COL_DATA_NAME as i32,
+            q.add_where(
+                ffi::SHIM_COL_DATA_NAME,
                 &format!("= '{}'", sql_escape(&d.data_object)),
             )?;
         }
         Target::Collection(c) => {
-            add_select(inp_ref, ffi::COL_COLL_CREATE_TIME as i32);
-            add_select(inp_ref, ffi::COL_COLL_MODIFY_TIME as i32);
-            add_where(
-                inp_ref,
-                ffi::COL_COLL_NAME as i32,
+            q.add_select(ffi::SHIM_COL_COLL_CREATE_TIME);
+            q.add_select(ffi::SHIM_COL_COLL_MODIFY_TIME);
+            q.add_where(
+                ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&c.collection)),
             )?;
         }
     }
 
-    let rows = run_query(conn, inp_ref)?;
+    let rows = conn.query(&mut q)?;
 
     let mut timestamps = Vec::with_capacity(rows.len() * 2);
     for row in rows {
@@ -532,15 +462,13 @@ fn fetch_contents(conn: &mut RodsConnection, parent: &str) -> Result<Vec<Item>, 
     let mut items = Vec::new();
 
     // 1. Sub-collections directly under `parent`.
-    let mut inp = new_query_inp();
-    let inp_ref = unsafe { inp.assume_init_mut() };
-    add_select(inp_ref, ffi::COL_COLL_NAME as i32);
-    add_where(
-        inp_ref,
-        ffi::COL_COLL_PARENT_NAME as i32,
+    let mut q = GenQuery::new();
+    q.add_select(ffi::SHIM_COL_COLL_NAME);
+    q.add_where(
+        ffi::SHIM_COL_COLL_PARENT_NAME,
         &format!("= '{}'", sql_escape(parent)),
     )?;
-    let sub_rows = run_query(conn, inp_ref)?;
+    let sub_rows = conn.query(&mut q)?;
     for row in sub_rows {
         let path = row.into_iter().next().unwrap_or_default();
         items.push(Target::Collection(Collection {
@@ -554,15 +482,13 @@ fn fetch_contents(conn: &mut RodsConnection, parent: &str) -> Result<Vec<Item>, 
     }
 
     // 2. Data objects directly under `parent`.
-    let mut inp = new_query_inp();
-    let inp_ref = unsafe { inp.assume_init_mut() };
-    add_select(inp_ref, ffi::COL_DATA_NAME as i32);
-    add_where(
-        inp_ref,
-        ffi::COL_COLL_NAME as i32,
+    let mut q = GenQuery::new();
+    q.add_select(ffi::SHIM_COL_DATA_NAME);
+    q.add_where(
+        ffi::SHIM_COL_COLL_NAME,
         &format!("= '{}'", sql_escape(parent)),
     )?;
-    let data_rows = run_query(conn, inp_ref)?;
+    let data_rows = conn.query(&mut q)?;
     for row in data_rows {
         let name = row.into_iter().next().unwrap_or_default();
         items.push(Target::DataObject(DataObject {

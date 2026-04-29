@@ -5,15 +5,17 @@
 
 //! Safe wrapper around an iRODS client connection.
 //!
-//! This module exposes `RodsConnection`, a RAII handle over `rcComm_t *`.
-//! Constructing one calls `rcConnect`; dropping one calls `rcDisconnect`. The
-//! raw connection pointer is never exposed outside this module — everything
-//! a caller can do with a connection goes through safe methods that land in
-//! later commits (authentication, reconnect, per-operation calls).
+//! This module exposes `RodsConnection`, a RAII handle over an opaque
+//! `shim_rods_conn_t *` (internally a `rcComm_t *`, hidden inside the C
+//! shim — see `shim/ffi_shim.{c,h}` and issue #9 for the rationale).
+//! Constructing one calls `shim_open` (`rcConnect`); dropping one
+//! calls `shim_close` (`rcDisconnect`). Every iRODS API in use by
+//! baton-rs (auth, stat, queries, metamod, error-name lookup) lands
+//! through the shim — Rust has no `rcComm_t *` cast site any longer.
 //!
-//! Connections are single-threaded by default: the underlying `rcComm_t *` is
-//! not safe to share across threads, and the raw-pointer field makes
-//! `RodsConnection` `!Send` and `!Sync` automatically.
+//! Connections are single-threaded by default: the underlying iRODS
+//! handle is not safe to share across threads, and the raw-pointer
+//! field makes `RodsConnection` `!Send` and `!Sync` automatically.
 
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
@@ -44,7 +46,66 @@ pub enum ObjType {
 
 /// A live connection to an iRODS server.
 pub struct RodsConnection {
-    conn: *mut ffi::rcComm_t,
+    conn: *mut ffi::shim_rods_conn,
+}
+
+/// Builder over an iRODS general query (`genQueryInp_t`), held opaque
+/// behind the C shim. Construct one with [`GenQuery::new`], populate
+/// the SELECT and WHERE lists, then run it through
+/// [`RodsConnection::query`]. Dropping a `GenQuery` frees the
+/// underlying iRODS state via `clearGenQueryInp`.
+///
+/// `pub(crate)` because the per-flag fetchers in `crate::operations`
+/// are the only callers; we don't expose a low-level query builder
+/// across the public crate boundary.
+pub(crate) struct GenQuery {
+    handle: *mut ffi::shim_query,
+}
+
+impl GenQuery {
+    pub(crate) fn new() -> Self {
+        let handle = unsafe { ffi::shim_query_new() };
+        // Only failure mode is calloc OOM at construct time. Panicking
+        // is appropriate — there's no useful work the caller can do
+        // when the allocator is exhausted.
+        assert!(!handle.is_null(), "shim_query_new returned NULL");
+        Self { handle }
+    }
+
+    /// Add `col` to the SELECT list (no aggregation). `col` is one of
+    /// the `ffi::SHIM_COL_*` enum values; the shim translates to the
+    /// iRODS `COL_*` numeric internally.
+    pub(crate) fn add_select(&mut self, col: ffi::shim_col_t) {
+        unsafe { ffi::shim_query_add_select(self.handle, col) };
+    }
+
+    /// Add a WHERE condition. `condition` is the operator + literal in
+    /// the form iRODS's genQuery parser wants, e.g. `"= '/zone/home'"`.
+    /// Returns an error if `condition` contains an interior NUL.
+    pub(crate) fn add_where(
+        &mut self,
+        col: ffi::shim_col_t,
+        condition: &str,
+    ) -> Result<(), BatonError> {
+        let c = CString::new(condition).map_err(|_| BatonError {
+            code: -1,
+            message: "WHERE condition contains interior NUL".to_string(),
+        })?;
+        let status = unsafe { ffi::shim_query_add_where(self.handle, col, c.as_ptr()) };
+        if status != 0 {
+            return Err(BatonError::from_irods(status));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for GenQuery {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::shim_query_free(self.handle) };
+            self.handle = std::ptr::null_mut();
+        }
+    }
 }
 
 impl RodsConnection {
@@ -59,35 +120,44 @@ impl RodsConnection {
         Ok(Self { conn })
     }
 
-    /// Internal: open a fresh `rcComm_t *` using the iRODS environment
+    /// Internal: open a fresh connection using the iRODS environment
     /// file. Shared between [`Self::connect_from_env`] and
     /// [`Self::reconnect`] so both use the same connect parameters.
-    fn open_raw() -> Result<*mut ffi::rcComm_t, BatonError> {
-        let mut env = MaybeUninit::<ffi::rodsEnv>::zeroed();
-        let env_status = unsafe { ffi::getRodsEnv(env.as_mut_ptr()) };
+    ///
+    /// Goes through the shim's `shim_get_env` + `shim_open`. The shim
+    /// reads `rodsEnv`, calls `rcConnect`, and surfaces the error
+    /// message text via a caller-supplied buffer — bindings never see
+    /// the iRODS structs.
+    fn open_raw() -> Result<*mut ffi::shim_rods_conn, BatonError> {
+        let mut env = MaybeUninit::<ffi::shim_env_t>::zeroed();
+        let env_status = unsafe { ffi::shim_get_env(env.as_mut_ptr()) };
         if env_status != 0 {
             return Err(BatonError::from_irods(env_status));
         }
         let env = unsafe { env.assume_init() };
 
-        let mut err_msg = MaybeUninit::<ffi::rErrMsg_t>::zeroed();
+        let mut status: std::os::raw::c_int = 0;
+        // Buffer size is generous — iRODS error messages are bounded but
+        // we'd rather truncate cleanly inside the shim than guess too low.
+        let mut err_msg: [std::os::raw::c_char; 1024] = [0; 1024];
+
         let conn = unsafe {
-            ffi::rcConnect(
-                env.rodsHost.as_ptr(),
-                env.rodsPort,
-                env.rodsUserName.as_ptr(),
-                env.rodsZone.as_ptr(),
-                0, // reconnFlag
+            ffi::shim_open(
+                env.host.as_ptr(),
+                env.port,
+                env.user.as_ptr(),
+                env.zone.as_ptr(),
+                &mut status,
                 err_msg.as_mut_ptr(),
+                err_msg.len() as std::os::raw::c_int,
             )
         };
 
         if conn.is_null() {
-            let err_msg = unsafe { err_msg.assume_init() };
-            let msg = unsafe { CStr::from_ptr(err_msg.msg.as_ptr()) }
+            let msg = unsafe { CStr::from_ptr(err_msg.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
-            return Err(BatonError::from_irods_with_context(err_msg.status, &msg));
+            return Err(BatonError::from_irods_with_context(status, &msg));
         }
 
         Ok(conn)
@@ -96,162 +166,101 @@ impl RodsConnection {
     /// Stat an iRODS path to confirm existence and discover basic metadata
     /// (size, checksum, object type).
     ///
-    /// Wraps `rcObjStat` + `freeRodsObjStat`. Callers get a plain Rust
-    /// [`ObjStat`]; the underlying iRODS allocation is released before this
-    /// method returns.
+    /// Wraps `shim_stat`, which internally builds the `dataObjInp_t`,
+    /// calls `rcObjStat`, copies the relevant fields, and frees the
+    /// iRODS allocation before returning. Callers see only the POD
+    /// `shim_stat_t`.
     pub fn stat(&mut self, path: &str) -> Result<ObjStat, BatonError> {
-        // Build the input struct. Only objPath is populated; everything else
-        // is left zeroed (rcObjStat reads no other fields for a plain stat).
-        let mut inp = MaybeUninit::<ffi::dataObjInp_t>::zeroed();
-        let inp_ref = unsafe { inp.assume_init_mut() };
-
         let path_c = CString::new(path).map_err(|_| BatonError {
             code: -1,
             message: "path contains interior NUL".to_string(),
         })?;
-        let path_bytes = path_c.as_bytes();
-        if path_bytes.len() >= inp_ref.objPath.len() {
-            return Err(BatonError {
-                code: -1,
-                message: format!(
-                    "path length {} exceeds MAX_NAME_LEN {}",
-                    path_bytes.len(),
-                    inp_ref.objPath.len() - 1
-                ),
-            });
-        }
-        for (i, &b) in path_bytes.iter().enumerate() {
-            inp_ref.objPath[i] = b as std::os::raw::c_char;
-        }
-        // objPath was zero-initialised, so the NUL terminator is already there.
 
-        let mut stat_out: *mut ffi::rodsObjStat_t = std::ptr::null_mut();
-        let status = unsafe { ffi::rcObjStat(self.conn, inp_ref, &mut stat_out) };
+        let mut out = MaybeUninit::<ffi::shim_stat_t>::zeroed();
+        let status = unsafe { ffi::shim_stat(self.conn, path_c.as_ptr(), out.as_mut_ptr()) };
 
         if status < 0 {
             return Err(BatonError::from_irods(status));
         }
-        if stat_out.is_null() {
-            return Err(BatonError {
-                code: -1,
-                message: "rcObjStat returned null with non-negative status".to_string(),
-            });
-        }
+        let out = unsafe { out.assume_init() };
 
-        // Read out the fields we care about while stat_out is still valid.
-        let stat_ref = unsafe { &*stat_out };
-        let obj_type = match stat_ref.objType as i32 {
-            // DATA_OBJ_T = 1, COLL_OBJ_T = 2 in iRODS rodsType.h.
+        let obj_type = match out.obj_type {
+            // 1 = data object, 2 = collection — see shim_stat_t docs.
             1 => ObjType::DataObject,
             2 => ObjType::Collection,
             other => ObjType::Other(other),
         };
-        let result = ObjStat {
-            size: stat_ref.objSize as u64,
-            checksum: unsafe { CStr::from_ptr(stat_ref.chksum.as_ptr()) }
+
+        Ok(ObjStat {
+            size: out.size as u64,
+            checksum: unsafe { CStr::from_ptr(out.checksum.as_ptr()) }
                 .to_string_lossy()
                 .into_owned(),
             obj_type,
-        };
-
-        // Always free, even if we'd constructed an error above.
-        unsafe {
-            ffi::freeRodsObjStat(stat_out);
-        }
-
-        Ok(result)
+        })
     }
 
-    /// Execute a prepared `genQueryInp_t` and return every matching row as
-    /// a flat `Vec<Vec<String>>`. Pagination via `continueInx` is handled
-    /// internally — callers see one combined result.
+    /// Execute a prepared [`GenQuery`] and return every matching row as
+    /// a flat `Vec<Vec<String>>`. Pagination is handled inside the
+    /// shim's `shim_query_exec` — callers see one combined result.
     ///
-    /// The caller is responsible for populating the SELECT / WHERE pairs
-    /// (via `addInxIval` / `addInxVal`) and for calling
-    /// `clearGenQueryInp` on the input after this method returns.
-    /// `CAT_NO_ROWS_FOUND` is treated as a normal empty result, not an
-    /// error — any other negative status becomes a `BatonError`.
+    /// `CAT_NO_ROWS_FOUND` is treated as an empty result, not an error
+    /// (the shim absorbs that). Any other negative iRODS status
+    /// becomes a `BatonError`.
     ///
-    /// `pub(crate)` because the `genQueryInp_t` type is crate-internal; we
-    /// don't want to leak raw iRODS structs through the public API. The
-    /// per-flag helpers in `crate::operations` build the input locally and
-    /// expose typed wrappers.
+    /// `pub(crate)` because [`GenQuery`] is crate-internal; the
+    /// per-flag helpers in `crate::operations` build the query locally
+    /// and expose typed wrappers.
     pub(crate) fn query(
         &mut self,
-        inp: &mut ffi::genQueryInp_t,
+        q: &mut GenQuery,
     ) -> Result<Vec<Vec<String>>, BatonError> {
-        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut status: std::os::raw::c_int = 0;
+        let result = unsafe { ffi::shim_query_exec(self.conn, q.handle, &mut status) };
 
-        loop {
-            let mut out: *mut ffi::genQueryOut_t = std::ptr::null_mut();
-            let status = unsafe { ffi::rcGenQuery(self.conn, inp, &mut out) };
-
-            // A successful query that matched no rows returns
-            // CAT_NO_ROWS_FOUND (-808000). Report as empty, not an error.
-            //
-            // bindgen doesn't surface the constant from rodsClient.h's
-            // transitive includes — the symbol must live behind a header
-            // that wrapper.h doesn't reach. Hardcode the well-known value
-            // rather than expanding wrapper.h for one constant.
-            const CAT_NO_ROWS_FOUND: i32 = -808000;
-            if status == CAT_NO_ROWS_FOUND {
-                return Ok(rows);
-            }
-            if status < 0 {
-                return Err(BatonError::from_irods(status));
-            }
-            if out.is_null() {
-                return Err(BatonError {
-                    code: -1,
-                    message: "rcGenQuery returned null with non-negative status".to_string(),
-                });
-            }
-
-            // Read out all rows in this page. sqlResult[c].value is a flat
-            // buffer — row `r`'s value for column `c` lives at offset
-            // `r * sqlResult[c].len`, NUL-terminated within that slot.
-            let out_ref = unsafe { &*out };
-            for row_idx in 0..out_ref.rowCnt {
-                let mut row = Vec::with_capacity(out_ref.attriCnt as usize);
-                for col_idx in 0..out_ref.attriCnt {
-                    let sql = &out_ref.sqlResult[col_idx as usize];
-                    let offset = (row_idx * sql.len) as isize;
-                    let value_ptr = unsafe { sql.value.offset(offset) };
-                    let s = unsafe { CStr::from_ptr(value_ptr as *const _) }
-                        .to_string_lossy()
-                        .into_owned();
-                    row.push(s);
-                }
-                rows.push(row);
-            }
-
-            let continue_inx = out_ref.continueInx;
-            unsafe { ffi::freeGenQueryOut(&mut out) };
-
-            if continue_inx <= 0 {
-                break;
-            }
-            inp.continueInx = continue_inx;
+        if result.is_null() {
+            return Err(BatonError::from_irods(status));
         }
 
+        let n_rows = unsafe { ffi::shim_query_result_row_count(result) };
+        let n_cols = unsafe { ffi::shim_query_result_col_count(result) };
+
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(n_rows as usize);
+        for r in 0..n_rows {
+            let mut row = Vec::with_capacity(n_cols as usize);
+            for c in 0..n_cols {
+                let cell = unsafe { ffi::shim_query_result_get(result, r, c) };
+                // shim_query_result_get only returns NULL on
+                // out-of-range indices — we're inside the bounds we
+                // just read, so a NULL here would be a shim bug.
+                let s = if cell.is_null() {
+                    String::new()
+                } else {
+                    unsafe { CStr::from_ptr(cell) }
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                row.push(s);
+            }
+            rows.push(row);
+        }
+
+        unsafe { ffi::shim_query_result_free(result) };
         Ok(rows)
     }
 
     /// Add or remove a single AVU on a data object or collection.
     ///
-    /// Wraps `rcModAVUMetadata`, which uses a stringly-typed
-    /// `modAVUMetadataInp_t.arg0..arg9` layout:
-    ///   arg0 = operation ("add" / "rm")
-    ///   arg1 = target-type flag ("-d" data object, "-C" collection)
-    ///   arg2 = absolute iRODS path
-    ///   arg3 = AVU attribute
-    ///   arg4 = AVU value
-    ///   arg5 = AVU units (NULL when the AVU has no units)
-    ///   arg6..arg9 unused for this entry point
+    /// Wraps `shim_mod_avu`, which builds the iRODS
+    /// `modAVUMetadataInp_t` (arg0..arg9 stringly-typed positional
+    /// layout) and calls `rcModAVUMetadata` internally. Rust just
+    /// hands over the named pieces:
+    ///   - operation: "add" or "rm"
+    ///   - target type: "-d" (data object) or "-C" (collection)
+    ///   - path / attribute / value / optional units
     ///
-    /// All `CString` allocations live for the `rcModAVUMetadata` call
-    /// only — iRODS does not retain pointers past return, so the
-    /// stack-local strings can be dropped immediately after.
+    /// `CString` allocations live only for the call — iRODS does not
+    /// retain the pointers past return.
     pub fn mod_avu(
         &mut self,
         operation: MetamodOperation,
@@ -260,33 +269,32 @@ impl RodsConnection {
     ) -> Result<(), BatonError> {
         // Operation + target-type flag are constants, so CString::new
         // can never fail on them; unwrap is appropriate.
-        let arg0 = CString::new(match operation {
+        let op_c = CString::new(match operation {
             MetamodOperation::Add => "add",
             MetamodOperation::Rm => "rm",
         })
         .unwrap();
-        let arg1 = CString::new(match target {
+        let tt_c = CString::new(match target {
             Target::DataObject(_) => "-d",
             Target::Collection(_) => "-C",
         })
         .unwrap();
 
-        // The remaining args come from caller-supplied strings, so a
-        // NUL byte anywhere is a programmer/input error we surface as
-        // a clean BatonError rather than a panic.
-        let arg2 = CString::new(target.path()).map_err(|_| BatonError {
+        // Caller-supplied strings — interior NUL is a programmer/input
+        // error we surface as a clean BatonError rather than a panic.
+        let path_c = CString::new(target.path()).map_err(|_| BatonError {
             code: -1,
             message: "path contains interior NUL".to_string(),
         })?;
-        let arg3 = CString::new(avu.attribute.as_str()).map_err(|_| BatonError {
+        let attr_c = CString::new(avu.attribute.as_str()).map_err(|_| BatonError {
             code: -1,
             message: "AVU attribute contains interior NUL".to_string(),
         })?;
-        let arg4 = CString::new(avu.value.as_str()).map_err(|_| BatonError {
+        let value_c = CString::new(avu.value.as_str()).map_err(|_| BatonError {
             code: -1,
             message: "AVU value contains interior NUL".to_string(),
         })?;
-        let arg5 = avu
+        let units_c = avu
             .units
             .as_ref()
             .map(|u| CString::new(u.as_str()))
@@ -295,23 +303,21 @@ impl RodsConnection {
                 code: -1,
                 message: "AVU units contains interior NUL".to_string(),
             })?;
+        let units_ptr = units_c
+            .as_ref()
+            .map_or(std::ptr::null(), |c| c.as_ptr());
 
-        let mut inp = MaybeUninit::<ffi::modAVUMetadataInp_t>::zeroed();
-        let inp_ref = unsafe { inp.assume_init_mut() };
-        inp_ref.arg0 = arg0.as_ptr() as *mut _;
-        inp_ref.arg1 = arg1.as_ptr() as *mut _;
-        inp_ref.arg2 = arg2.as_ptr() as *mut _;
-        inp_ref.arg3 = arg3.as_ptr() as *mut _;
-        inp_ref.arg4 = arg4.as_ptr() as *mut _;
-        if let Some(u) = arg5.as_ref() {
-            inp_ref.arg5 = u.as_ptr() as *mut _;
-        }
-        // arg6..arg9 stay null from the zeroed initialiser.
-
-        let status = unsafe { ffi::rcModAVUMetadata(self.conn, inp_ref) };
-
-        // CStrings drop here; the dangling pointers in `inp` are
-        // harmless because rcModAVUMetadata has already returned.
+        let status = unsafe {
+            ffi::shim_mod_avu(
+                self.conn,
+                op_c.as_ptr(),
+                tt_c.as_ptr(),
+                path_c.as_ptr(),
+                attr_c.as_ptr(),
+                value_c.as_ptr(),
+                units_ptr,
+            )
+        };
 
         if status != 0 {
             return Err(BatonError::from_irods(status));
@@ -324,19 +330,19 @@ impl RodsConnection {
     /// place, re-authenticating via [`Self::login_from_auth_file`].
     ///
     /// Use this after an idle period or a transient network failure.
-    /// Session 3+ will drive it from the `--connect-time` CLI flag;
-    /// here it's a manually-invoked helper that forms the building
-    /// block for that.
+    /// A future session will drive it from a `--connect-time` CLI
+    /// flag; for now it's a manually-invoked helper that forms the
+    /// building block for that.
     ///
     /// On failure the connection pointer is left null (from the
     /// disconnect step), so it's always safe to drop the
     /// [`RodsConnection`] after a failed reconnect.
     pub fn reconnect(&mut self) -> Result<(), BatonError> {
-        // Close the current connection. rcDisconnect's return is a
-        // status we have nothing useful to do with on the teardown path.
+        // Close the current connection. shim_close's return is a status
+        // we have nothing useful to do with on the teardown path.
         if !self.conn.is_null() {
             unsafe {
-                ffi::rcDisconnect(self.conn);
+                ffi::shim_close(self.conn);
             }
             self.conn = std::ptr::null_mut();
         }
@@ -362,44 +368,50 @@ impl RodsConnection {
     /// icommands authenticate fine.
     ///
     /// The flow here instead matches what `iinit`/`ils` do under the
-    /// hood:
+    /// hood, via the C shim:
     ///
-    /// 1. `obfGetPw` reads and deobfuscates the `.irodsA` file into a
-    ///    plaintext password buffer.
-    /// 2. `clientLoginWithPassword` runs the legacy native auth handshake
-    ///    (`rcAuthRequest` → MD5(challenge + password) → `rcAuthResponse`)
-    ///    without touching API 110000.
+    /// 1. `shim_get_password` (`obfGetPw`) reads and deobfuscates the
+    ///    `.irodsA` file into a plaintext password buffer.
+    /// 2. `shim_login_password` (`clientLoginWithPassword`) runs the
+    ///    legacy native auth handshake (`rcAuthRequest` →
+    ///    MD5(challenge + password) → `rcAuthResponse`) without
+    ///    touching API 110000.
     ///
-    /// Only native auth is supported in Session 2. PAM/GSI/Kerberos and
+    /// Only native auth is supported. PAM/GSI/Kerberos and
     /// interactive-password flows are out of scope and would land as
     /// separate methods in whichever session first needs them.
     pub fn login_from_auth_file(&mut self) -> Result<(), BatonError> {
-        // MAX_PASSWORD_LEN is 50 in iRODS; sized generously here.
+        // MAX_PASSWORD_LEN is 50 in iRODS; sized generously here. The
+        // shim sanity-checks buf_len ≥ 64 before delegating to obfGetPw.
         let mut password: [std::os::raw::c_char; 128] = [0; 128];
 
-        let status = unsafe { ffi::obfGetPw(password.as_mut_ptr()) };
+        // Stack arrays aren't auto-zeroed at function exit, so leaving
+        // the plaintext sitting on the stack after we're done with it
+        // would extend the window of exposure to anything inspecting
+        // process memory (panic unwinders, core dumps, attached
+        // debuggers). `write_volatile` keeps the compiler from
+        // optimising the writes away. The closure runs unconditionally
+        // before each return so an early failure (e.g. a partial
+        // obfGetPw write) doesn't leave bytes behind.
+        let zero_password = |buf: &mut [std::os::raw::c_char; 128]| {
+            for byte in buf.iter_mut() {
+                unsafe { std::ptr::write_volatile(byte, 0) };
+            }
+        };
+
+        let status = unsafe {
+            ffi::shim_get_password(password.as_mut_ptr(), password.len() as std::os::raw::c_int)
+        };
         if status != 0 {
-            // password is still all-zero from the array initialiser; no
-            // sensitive bytes to scrub on this path.
+            zero_password(&mut password);
             return Err(BatonError::from_irods_with_context(
                 status,
-                "obfGetPw failed (is .irodsA present?)",
+                "shim_get_password failed (is .irodsA present?)",
             ));
         }
 
-        let status = unsafe {
-            ffi::clientLoginWithPassword(self.conn, password.as_mut_ptr())
-        };
-
-        // Zero the password buffer regardless of the login outcome.
-        // Stack arrays aren't auto-zeroed at function exit, so leaving
-        // the plaintext sitting on the stack would extend the window of
-        // exposure to anything inspecting process memory (panic
-        // unwinders, core dumps, attached debuggers). write_volatile
-        // prevents the compiler from optimising the writes away.
-        for byte in password.iter_mut() {
-            unsafe { std::ptr::write_volatile(byte, 0) };
-        }
+        let status = unsafe { ffi::shim_login_password(self.conn, password.as_ptr()) };
+        zero_password(&mut password);
 
         if status != 0 {
             return Err(BatonError::from_irods(status));
@@ -412,10 +424,10 @@ impl RodsConnection {
 impl Drop for RodsConnection {
     fn drop(&mut self) {
         if !self.conn.is_null() {
-            // rcDisconnect returns a status code, but there's nothing useful
-            // to do with it here — we're on the destruction path.
+            // shim_close returns a status code, but there's nothing
+            // useful to do with it here — we're on the destruction path.
             unsafe {
-                ffi::rcDisconnect(self.conn);
+                ffi::shim_close(self.conn);
             }
             self.conn = std::ptr::null_mut();
         }

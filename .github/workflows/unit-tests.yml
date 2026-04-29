@@ -9,15 +9,17 @@ jobs:
     strategy:
       matrix:
         include:
-          # 4.2.7 is marked experimental from Session 2 onward: its Ubuntu 16.04
-          # base ships libclang 3.8, which predates API calls bindgen 0.71 uses.
-          # Re-enabling strict mode would require backporting a newer libclang
-          # into the build path — deferred unless/until 4.2.7 support becomes
-          # load-bearing again.
+          # 4.2.7 was marked experimental during Sessions 2–4 because its
+          # Ubuntu 16.04 base ships libclang 3.8, which modern bindgen /
+          # clang-sys cannot run on (they require libclang ≥ 5.0).
+          # Session 4.5 (issue #9) replaced bindgen with a hand-written
+          # FFI mirror of `shim/ffi_shim.h` in `src/ffi.rs`, dropping the
+          # libclang dependency entirely. 4.2.7 is back to strict mode
+          # alongside the 4.3.x matrix entries.
           - irods: "4.2.7"
             build_image: "ghcr.io/wtsi-npg/ub-16.04-irods-clients-dev-4.2.7:latest"
             server_image: "ghcr.io/wtsi-npg/ub-16.04-irods-4.2.7:latest"
-            experimental: true
+            experimental: false
           - irods: "4.3.4"
             build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.4:latest"
             server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.4:latest"
