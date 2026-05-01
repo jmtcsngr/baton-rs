@@ -160,6 +160,69 @@ fn chmod_grants_read_to_public_group() {
 }
 
 #[test]
+fn chmod_grants_read_on_data_object_target() {
+    // Pin two things at once that the collection-only suite above
+    // doesn't reach:
+    //
+    // 1. The data-object branch of `chmod_one` — `target_is_collection`
+    //    is false, so the `recursive` flag gets masked to false even
+    //    when the caller asks for it. iRODS itself would silently
+    //    accept a recurse flag against a data-object input, so the
+    //    mask is purely a baton-rs client-side cleanliness measure.
+    //
+    // 2. Echo byte-equality on a successful non-empty grant — the
+    //    output `Target` is `==` to the input. No surprise mutation
+    //    of the access list, no fields silently dropped or reordered.
+    let local = "/tmp/baton_rs_chmod_data_object_target";
+    std::fs::write(local, b"chmod data object").expect("write");
+
+    let remote_coll = "/testZone/home/irods";
+    let data_object = "baton_rs_chmod_data_object_obj";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = data_object_target(
+        remote_coll,
+        data_object,
+        Some(vec![Acl {
+            owner: PUBLIC_GROUP.to_string(),
+            level: AclLevel::Read,
+            zone: None,
+        }]),
+    );
+    let input_clone = input.clone();
+
+    // recursive=true even though target is a data object — chmod_one
+    // masks it to false client-side. The grant must still apply.
+    let opts = ChmodOptions { recursive: true };
+    let output = chmod_one(&mut conn, input, &opts).expect("chmod_one data-object grant");
+
+    // Echo: the output Target is byte-equal to the input on success.
+    assert_eq!(
+        output, input_clone,
+        "chmod_one should echo the input on success without mutating any field"
+    );
+
+    // Confirm the grant actually applied — passing the recurse flag
+    // on a data-object input must not silently no-op the call.
+    let access = fetch_access(
+        &mut conn,
+        data_object_target(remote_coll, data_object, None),
+    );
+    assert!(
+        access
+            .iter()
+            .any(|a| a.owner == PUBLIC_GROUP && a.level == AclLevel::Read),
+        "data object should have public:read after grant; got {:?}",
+        access
+    );
+}
+
+#[test]
 fn chmod_revokes_with_null_level() {
     // Pre-stage a `read` ACL via ichmod, then null-revoke it via
     // chmod_one. The post-revoke fetch must not show public in the
