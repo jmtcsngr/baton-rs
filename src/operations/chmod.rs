@@ -22,7 +22,11 @@
 //!
 //! `--recurse` only takes effect on collection targets; iRODS
 //! performs the traversal server-side via `recursiveFlag`. Data
-//! object targets ignore the flag (they have no children).
+//! object targets ignore the flag (they have no children). The
+//! server-side walk has no client-side ceiling — a recursive
+//! grant on a high-level collection rewrites the ACL on every
+//! descendant. Matches upstream baton; iRODS itself has no
+//! max-depth bound either.
 
 use crate::connection::RodsConnection;
 use crate::error::BatonError;

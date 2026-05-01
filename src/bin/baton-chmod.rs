@@ -43,6 +43,12 @@ struct Args {
     /// Apply each ACL change recursively to the children of a
     /// collection. iRODS performs the traversal server-side; the
     /// flag is silently ignored on data-object inputs.
+    ///
+    /// The server-side walk has no client-side ceiling: a single
+    /// `--recurse` against `/zone/home/user` rewrites the ACL on
+    /// every descendant. Mirrors upstream baton — there is no
+    /// max-depth or rate limit on the iRODS side either. Use with
+    /// care on large trees.
     #[arg(short = 'r', long)]
     recurse: bool,
 
