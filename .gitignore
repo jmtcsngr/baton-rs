@@ -1,2 +1,8 @@
 /target/
 **/*.rs.bk
+
+# This crate is treated as a library — `cargo` recommends gitignoring
+# `Cargo.lock` for libraries so downstream consumers' lockfiles win
+# version resolution. Decision recorded during the Session 4.5 audit
+# pass; revisit once we publish a binary release artefact.
+/Cargo.lock
