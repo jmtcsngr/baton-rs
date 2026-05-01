@@ -17,6 +17,13 @@
 //! error. `--verify` implies `--checksum` on the output: the digest
 //! is in hand by the time we compare, and dropping it would be
 //! arbitrary.
+//!
+//! The MD5 here is an **integrity check** matching the digest iRODS
+//! stores in its catalog — not a cryptographic claim. MD5 is broken
+//! for adversarial-collision resistance, but the threat model for
+//! `--verify` is detecting accidental corruption (network bit-flip,
+//! disk error, partial write) by an honest client / server. SHA2
+//! support is tracked in #31; the matrix coverage is in #27.
 
 use std::fs::File;
 use std::io::Read;

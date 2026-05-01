@@ -45,8 +45,9 @@ impl Drop for LocalCleanup {
 /// MD5 digest of `bytes` as 32 lowercase hex chars. Used by the
 /// `--checksum` cross-check tests to compute an independent oracle
 /// for the digest baton-put returns from the server. Pure-Rust via
-/// the `md5` dev-dep so the test doesn't depend on a system
-/// `md5sum` being installed.
+/// the `md5` runtime dep (also used by `--verify` in
+/// `operations::put`); avoiding a system `md5sum` dependency keeps
+/// the tests portable across the iRODS dev images.
 fn md5_hex(bytes: &[u8]) -> String {
     format!("{:x}", md5::compute(bytes))
 }
