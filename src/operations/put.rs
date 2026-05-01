@@ -27,13 +27,15 @@ use crate::types::Target;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PutOptions {
     /// Compute and record a server-side checksum after the upload
-    /// completes; populated on the output `checksum` field. Wired in
-    /// the next commit.
+    /// completes via `rcDataObjChksum`; populated on the output
+    /// `checksum` field. The format depends on the server hash
+    /// scheme — bare 32-char hex for MD5 (the client default pinned
+    /// for issue #25), `sha2:<base64>` for SHA2.
     pub checksum: bool,
 
     /// Compute MD5 client-side as bytes are streamed up, then
     /// compare against the server's checksum after close. Mismatch
-    /// surfaces as a per-input error. Wired in the commit after.
+    /// surfaces as a per-input error. Wired in the next commit.
     pub verify: bool,
 }
 
@@ -59,10 +61,10 @@ const WRITE_CHUNK_SIZE: usize = 64 * 1024;
 pub fn put_one(
     conn: &mut RodsConnection,
     target: Target,
-    _opts: &PutOptions,
+    opts: &PutOptions,
 ) -> Result<Target, BatonError> {
     let path = target.path();
-    let data_obj = match target {
+    let mut data_obj = match target {
         Target::DataObject(d) => d,
         Target::Collection(c) => {
             return Err(BatonError {
@@ -96,6 +98,14 @@ pub fn put_one(
     let close_result = conn.close_data_object(handle);
     stream_result?;
     close_result?;
+
+    // Server-side checksum runs after close — `rcDataObjChksum`
+    // operates on the catalog state, not the in-flight L1 descriptor.
+    // Done unconditionally when --checksum is set; a future --verify
+    // path will also need the digest, so no point splitting the call.
+    if opts.checksum {
+        data_obj.checksum = Some(conn.checksum_data_object(&path)?);
+    }
 
     Ok(Target::DataObject(data_obj))
 }

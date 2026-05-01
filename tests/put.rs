@@ -3,6 +3,7 @@
 // Last modified by: Claude Opus 4.7 (1M context)
 // Last modified:    2026-05-01
 
+
 //! Integration tests for `operations::put`.
 //!
 //! Each test stages a local file under /tmp and tears down the
@@ -39,6 +40,15 @@ impl Drop for LocalCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// MD5 digest of `bytes` as 32 lowercase hex chars. Used by the
+/// `--checksum` cross-check tests to compute an independent oracle
+/// for the digest baton-put returns from the server. Pure-Rust via
+/// the `md5` dev-dep so the test doesn't depend on a system
+/// `md5sum` being installed.
+fn md5_hex(bytes: &[u8]) -> String {
+    format!("{:x}", md5::compute(bytes))
 }
 
 /// Round-trip helper: pull the freshly-put object back via inline get
@@ -281,6 +291,172 @@ fn put_annotated_error_for_missing_directory_field() {
         err
     );
 }
+
+// --- --checksum mode ---------------------------------------------------------
+
+#[test]
+fn put_with_checksum_populates_output_field() {
+    // Smoke test: --checksum populates the output `checksum` field
+    // with a non-empty string. The matches-independent-MD5 test
+    // below cross-checks the value's correctness.
+    let upload_dir = "/tmp/baton_rs_put_chksum_basic_dir";
+    let data_object = "baton_rs_put_chksum_basic_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, data_object));
+    std::fs::write(&upload_local, b"checksum me").expect("write source");
+    let _local_cleanup = LocalCleanup(upload_local);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let opts = PutOptions {
+        checksum: true,
+        verify: false,
+    };
+    let output = put_one(&mut conn, input, &opts).expect("put_one with --checksum");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+
+    let chksum = d
+        .checksum
+        .as_deref()
+        .expect("checksum field populated by --checksum");
+    assert!(
+        !chksum.is_empty(),
+        "checksum field should be a non-empty digest"
+    );
+}
+
+#[test]
+fn put_with_checksum_matches_independent_md5() {
+    // Cross-check: with the iRODS client default pinned to MD5 (#25),
+    // the server-side digest from rcDataObjChksum must match the MD5
+    // of the local source bytes computed by the `md5` dev-dep. This
+    // is the strongest guarantee available — proves the bytes the
+    // server holds match the bytes the test wrote, not just that
+    // *some* digest came back.
+    //
+    // Multi-chunk payload (~200 KiB) so the test also exercises the
+    // streaming-write path, not just the digest plumbing.
+    let upload_dir = "/tmp/baton_rs_put_chksum_match_dir";
+    let data_object = "baton_rs_put_chksum_match_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, data_object));
+    let content: Vec<u8> = (0u8..=255u8).cycle().take(200 * 1024).collect();
+    std::fs::write(&upload_local, &content).expect("write source");
+    let _local_cleanup = LocalCleanup(upload_local);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let opts = PutOptions {
+        checksum: true,
+        verify: false,
+    };
+    let output = put_one(&mut conn, input, &opts).expect("put_one with --checksum");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    let server_chksum = d
+        .checksum
+        .as_deref()
+        .expect("checksum field populated by --checksum")
+        .to_lowercase();
+    let local_md5 = md5_hex(&content);
+
+    // Allow an algorithm prefix on the server side ("MD5:abcd...");
+    // bare hex is the typical shape with the pinned MD5 default but
+    // the contains() check is robust if iRODS or the test image ever
+    // surfaces a prefix. SHA2 servers would be caught by issue #27's
+    // matrix work and aren't in scope here.
+    assert!(
+        server_chksum.contains(&local_md5),
+        "server checksum {server_chksum:?} should contain local MD5 {local_md5:?}"
+    );
+}
+
+#[test]
+fn put_without_checksum_leaves_checksum_field_unset() {
+    // Symmetric counter-test: a put without --checksum must NOT
+    // populate the checksum field. Pins that the wiring is gated on
+    // opts.checksum and not unconditionally enabled.
+    let upload_dir = "/tmp/baton_rs_put_no_chksum_dir";
+    let data_object = "baton_rs_put_no_chksum_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, data_object));
+    std::fs::write(&upload_local, b"no checksum requested").expect("write source");
+    let _local_cleanup = LocalCleanup(upload_local);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let output = put_one(&mut conn, input, &PutOptions::default()).expect("put_one");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    assert!(
+        d.checksum.is_none(),
+        "put without --checksum should not populate the checksum field; got {:?}",
+        d.checksum
+    );
+}
+
+// --- error / typed-error cases -----------------------------------------------
 
 #[test]
 fn put_on_collection_is_error() {
