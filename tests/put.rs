@@ -161,6 +161,52 @@ fn put_streams_multi_chunk_payload() {
 }
 
 #[test]
+fn put_round_trips_empty_data_object() {
+    // Zero-byte local file: stream_file_to_handle's read loop
+    // returns 0 on the first iteration and the write side never
+    // fires. Pin that the empty case is a normal success — no
+    // wire-level confusion, no synthetic minimum-size — and the
+    // server-side object is exactly zero bytes after the close.
+    // Symmetric counterpart to tests/get.rs's
+    // get_inline_round_trips_empty_data_object.
+    let upload_dir = "/tmp/baton_rs_put_empty_dir";
+    let data_object = "baton_rs_put_empty_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, data_object));
+    std::fs::write(&upload_local, b"").expect("write empty source");
+    let _local_cleanup = LocalCleanup(upload_local);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    put_one(&mut conn, input, &PutOptions::default()).expect("put_one empty");
+
+    let fetched = fetch_inline_bytes(&mut conn, remote_coll, data_object);
+    assert!(
+        fetched.is_empty(),
+        "empty put → empty get; got {} bytes back",
+        fetched.len()
+    );
+}
+
+#[test]
 fn put_overwrites_existing_data_object() {
     // SHIM_OPEN_WRITE maps to O_WRONLY|O_CREAT|O_TRUNC, so a put over
     // an existing object replaces it wholesale. Pre-seed with longer
@@ -410,6 +456,87 @@ fn put_with_checksum_matches_independent_md5() {
     assert!(
         server_chksum.contains(&local_md5),
         "server checksum {server_chksum:?} should contain local MD5 {local_md5:?}"
+    );
+}
+
+#[test]
+fn put_with_checksum_after_overwrite_reflects_new_bytes() {
+    // Pre-seed iRODS with stale content that differs from the new
+    // payload, then put with --checksum. The returned digest must
+    // describe the *new* bytes, not whatever iRODS had recorded for
+    // the stale object. Catches a regression where rcDataObjChksum
+    // is called against a stale catalog entry rather than recomputed
+    // from the just-written replica.
+    let upload_dir = "/tmp/baton_rs_put_chksum_overwrite_dir";
+    let data_object = "baton_rs_put_chksum_overwrite_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, data_object));
+    let new_content: &[u8] = b"the new payload after overwrite";
+    std::fs::write(&upload_local, new_content).expect("write source");
+    let _local_cleanup = LocalCleanup(upload_local);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+
+    // Pre-seed iRODS via iput -K so the catalog has an MD5 recorded
+    // up front. Without -K, the stale object would have no checksum
+    // in the catalog and the test wouldn't actually test the
+    // "stale-vs-new" distinction.
+    let stale_local = "/tmp/baton_rs_put_chksum_overwrite_stale";
+    let stale_content: &[u8] = b"stale content with a totally different digest";
+    std::fs::write(stale_local, stale_content).expect("write stale");
+    let stale_status = Command::new("iput")
+        .args(["-f", "-K", stale_local, &remote])
+        .status()
+        .expect("iput stale");
+    assert!(stale_status.success(), "stale iput -K failed");
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let opts = PutOptions {
+        checksum: true,
+        verify: false,
+    };
+    let output = put_one(&mut conn, input, &opts).expect("put_one --checksum overwrite");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    let server_chksum = d
+        .checksum
+        .as_deref()
+        .expect("checksum field populated by --checksum")
+        .to_lowercase();
+
+    // Server digest must contain the MD5 of the *new* bytes, and
+    // must NOT contain the MD5 of the stale bytes. Both checks pin
+    // the post-overwrite-recompute behaviour.
+    let new_md5 = md5_hex(new_content);
+    let stale_md5 = md5_hex(stale_content);
+    assert!(
+        server_chksum.contains(&new_md5),
+        "server digest after overwrite should contain MD5 of new bytes; \
+         got {server_chksum:?} new={new_md5:?}"
+    );
+    assert!(
+        !server_chksum.contains(&stale_md5),
+        "server digest after overwrite must NOT carry the stale MD5; \
+         got {server_chksum:?} stale={stale_md5:?}"
     );
 }
 
