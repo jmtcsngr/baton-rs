@@ -12,10 +12,14 @@
 //! in the next commits).
 
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use baton_rs::operations::list::{self, ListOptions};
-use baton_rs::{RodsConnection, Target};
+use baton_rs::{
+    parse_connect_time, ReconnectingSession, RodsConnection, Target,
+    DEFAULT_CONNECT_TIME_SECS,
+};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -49,6 +53,17 @@ struct Args {
     /// List the direct contents of a collection.
     #[arg(long)]
     contents: bool,
+
+    /// Wall-clock seconds before the iRODS connection is torn down
+    /// and rebuilt between input records. Default 600 (10 min);
+    /// minimum 10. Matches upstream baton's --connect-time / -c.
+    #[arg(
+        short = 'c',
+        long,
+        default_value_t = DEFAULT_CONNECT_TIME_SECS,
+        value_parser = parse_connect_time
+    )]
+    connect_time: u64,
 
     /// Verbose logging (DEBUG level).
     #[arg(short, long, conflicts_with = "silent")]
@@ -100,6 +115,8 @@ fn main() -> Result<()> {
 
     let mut conn = RodsConnection::connect_from_env().context("connecting to iRODS")?;
     conn.login_from_auth_file().context("authenticating")?;
+    let mut session =
+        ReconnectingSession::new(conn, Duration::from_secs(args.connect_time));
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -111,13 +128,19 @@ fn main() -> Result<()> {
             continue;
         }
 
+        // Reconnect at record boundaries when the wall-clock watchdog
+        // says it's time. Reconnect failures are fail-fast — there's
+        // no useful in-band annotation when the connection itself is
+        // broken.
+        let conn = session.maybe_reconnect().context("reconnecting to iRODS")?;
+
         let target: Target =
             serde_json::from_str(&line).context("parsing input line as a Target")?;
 
         // iRODS-side failures per input are annotated in-band and the
         // stream keeps going. Parse / IO errors above are still fail-fast
         // — we can't annotate something we couldn't parse.
-        let output = list::list_one_annotated(&mut conn, target, &opts);
+        let output = list::list_one_annotated(conn, target, &opts);
 
         serde_json::to_writer(&mut out, &output).context("writing output line")?;
         writeln!(&mut out).context("writing newline")?;

@@ -20,10 +20,107 @@
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::os::raw::{c_char, c_int, c_void};
+use std::time::{Duration, Instant};
 
 use crate::error::BatonError;
 use crate::ffi;
 use crate::types::{Avu, MetamodOperation, Target};
+
+/// Default `--connect-time` threshold in seconds. Matches upstream
+/// baton's `DEFAULT_MAX_CONNECT_TIME` (600s = 10 minutes) — see
+/// `baton/src/baton.h:34`. Long enough that typical short streams
+/// never reconnect; short enough that long-running streams cycle the
+/// connection before any firewall idle-timeout kicks in.
+pub const DEFAULT_CONNECT_TIME_SECS: u64 = 600;
+
+/// Minimum permitted `--connect-time` value. baton enforces ≥10s at
+/// `operations.c:77-83`; we mirror that — a one-second threshold
+/// would reconnect on almost every record and isn't a useful
+/// configuration.
+pub const MIN_CONNECT_TIME_SECS: u64 = 10;
+
+/// Wraps a [`RodsConnection`] with a wall-clock watchdog. The
+/// driving binary calls [`Self::maybe_reconnect`] before each input
+/// record; if the threshold has elapsed since the last reconnect
+/// (or the initial connect), the connection is torn down and rebuilt
+/// transparently.
+///
+/// Mirrors upstream baton's `--connect-time` semantics exactly:
+/// **between-records only**, never mid-stream. A long-running put or
+/// get holds the connection for its full duration; the reconnect
+/// fires before the *next* record. iRODS handles never get
+/// disconnected mid-write because we only check the threshold at
+/// record boundaries.
+///
+/// The actual reconnect call goes through
+/// [`RodsConnection::reconnect`], which already handles teardown +
+/// re-auth. Callers don't need to know the details.
+pub struct ReconnectingSession {
+    conn: RodsConnection,
+    last_reconnect: Instant,
+    max_connect_time: Duration,
+}
+
+impl ReconnectingSession {
+    /// Wrap an already-authenticated `conn` with a `--connect-time`
+    /// watchdog. The wall-clock starts ticking from this call —
+    /// callers should construct the session immediately after
+    /// `connect_from_env` + `login_from_auth_file`.
+    pub fn new(conn: RodsConnection, max_connect_time: Duration) -> Self {
+        Self {
+            conn,
+            last_reconnect: Instant::now(),
+            max_connect_time,
+        }
+    }
+
+    /// Reconnect if the threshold has elapsed since the last
+    /// reconnect (or initial connect). Returns a mutable borrow of
+    /// the underlying connection so the caller can drive the next
+    /// per-record op against it.
+    ///
+    /// On reconnect failure, the underlying [`RodsConnection`] is
+    /// left in a "null pointer, safe to drop" state per
+    /// `RodsConnection::reconnect`'s contract — the error is
+    /// returned to the caller, which can either propagate it
+    /// (fail-fast) or surface it as an in-band per-input error.
+    pub fn maybe_reconnect(&mut self) -> Result<&mut RodsConnection, BatonError> {
+        if should_reconnect(self.last_reconnect, self.max_connect_time) {
+            self.conn.reconnect()?;
+            self.last_reconnect = Instant::now();
+        }
+        Ok(&mut self.conn)
+    }
+
+    /// Borrow the connection without checking the threshold. Used
+    /// for the initial setup phase before the NDJSON loop starts —
+    /// e.g. the optional `--unsafe` path validation in Session 8.
+    pub fn conn_mut(&mut self) -> &mut RodsConnection {
+        &mut self.conn
+    }
+}
+
+/// Pure threshold check, extracted so the rule can be unit-tested
+/// without driving a real iRODS connection.
+fn should_reconnect(last_reconnect: Instant, max_connect_time: Duration) -> bool {
+    last_reconnect.elapsed() >= max_connect_time
+}
+
+/// Clap value parser for `--connect-time`. Accepts a positive
+/// integer number of seconds, rejecting values below
+/// [`MIN_CONNECT_TIME_SECS`] with a user-readable error. Shared
+/// across every binary that exposes the flag, so the validation
+/// rule lives in one place.
+pub fn parse_connect_time(s: &str) -> Result<u64, String> {
+    let n: u64 = s.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+    if n < MIN_CONNECT_TIME_SECS {
+        return Err(format!(
+            "--connect-time must be >= {} seconds",
+            MIN_CONNECT_TIME_SECS
+        ));
+    }
+    Ok(n)
+}
 
 /// Distilled-down stat output: just the fields that the listing layer
 /// needs. Avoids leaking `rodsObjStat_t` across the public crate boundary.
@@ -565,5 +662,55 @@ impl Drop for RodsConnection {
             }
             self.conn = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_reconnect_returns_true_when_threshold_is_zero() {
+        // Zero threshold: every check yields a reconnect. Used in
+        // integration tests to force-exercise the reconnect path
+        // without sleeping.
+        let now = Instant::now();
+        assert!(should_reconnect(now, Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn should_reconnect_returns_false_within_threshold() {
+        // Just-now reconnect with a typical 600s default — the check
+        // should report "no reconnect needed". The baton-rs binaries
+        // call this on every NDJSON record, so a false positive here
+        // would cause excessive reconnect overhead.
+        let now = Instant::now();
+        assert!(!should_reconnect(now, Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn should_reconnect_returns_true_past_threshold() {
+        // Simulate a reconnect 700 seconds in the past against a
+        // 600s threshold. `Instant::sub` is well-defined for
+        // sufficiently small offsets on the platforms we ship to
+        // (Linux); panics on overflow, which the tiny offset rules
+        // out.
+        let earlier = Instant::now() - Duration::from_secs(700);
+        assert!(should_reconnect(earlier, Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn min_connect_time_secs_matches_upstream() {
+        // Pin the constant to baton's enforced minimum so a future
+        // refactor can't silently drop below it. Upstream rejects
+        // anything < 10s in `operations.c:77-83`.
+        assert_eq!(MIN_CONNECT_TIME_SECS, 10);
+    }
+
+    #[test]
+    fn default_connect_time_secs_matches_upstream() {
+        // Same pinning rationale for the default — baton's
+        // `DEFAULT_MAX_CONNECT_TIME` is 600 (`baton.h:34`).
+        assert_eq!(DEFAULT_CONNECT_TIME_SECS, 600);
     }
 }
