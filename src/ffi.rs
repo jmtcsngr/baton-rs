@@ -209,5 +209,14 @@ extern "C" {
         units: *const c_char,
     ) -> c_int;
 
+    pub fn shim_mod_access_control(
+        conn: *mut shim_rods_conn_t,
+        path: *const c_char,
+        level: *const c_char,
+        user: *const c_char,
+        zone: *const c_char,
+        recursive: c_int,
+    ) -> c_int;
+
     pub fn shim_error_name(code: c_int) -> *const c_char;
 }

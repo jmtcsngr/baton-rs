@@ -599,11 +599,29 @@ fn fetch_contents(conn: &mut RodsConnection, parent: &str) -> Result<Vec<Item>, 
     Ok(items)
 }
 
+/// Map iRODS's catalog access-level string into our typed enum.
+///
+/// iRODS surfaces three formats across versions:
+///   * Compact 4.2.x: `read`, `write`, `own`, `null`.
+///   * Verbose 4.2.x (post-rcModAccessControl writes): `read object`,
+///     `modify object` (space-separated).
+///   * Compact 4.3.x: `read_object`, `modify_object` (underscore-
+///     separated). This is what `r_persistence_object` records on
+///     iRODS 4.3 servers when an ACL is granted via
+///     `rcModAccessControl`, and what `rcGenQuery` returns from the
+///     `COL_*_ACCESS_NAME` columns. Surfaced by Session 6's chmod
+///     tests on 4.3.4 — the catalog had no granted ACLs to read on
+///     earlier list-only tests, which is why the gap went
+///     undetected.
+///
+/// All three forms are accepted so behaviour stays stable across
+/// iRODS server versions that have shipped slightly different
+/// strings.
 fn parse_acl_level(s: &str) -> Result<AclLevel, BatonError> {
     match s {
         "null" => Ok(AclLevel::Null),
-        "read" | "read object" => Ok(AclLevel::Read),
-        "write" | "modify object" => Ok(AclLevel::Write),
+        "read" | "read object" | "read_object" => Ok(AclLevel::Read),
+        "write" | "modify object" | "modify_object" => Ok(AclLevel::Write),
         "own" => Ok(AclLevel::Own),
         other => Err(BatonError {
             code: -1,
@@ -621,8 +639,14 @@ mod tests {
         assert_eq!(parse_acl_level("null").unwrap(), AclLevel::Null);
         assert_eq!(parse_acl_level("read").unwrap(), AclLevel::Read);
         assert_eq!(parse_acl_level("read object").unwrap(), AclLevel::Read);
+        // iRODS 4.3.x compact form (underscore separator) — surfaced
+        // by Session 6's chmod tests on 4.3.4. The 4.2.x and 4.3.x
+        // server versions ship subtly different catalog strings, and
+        // baton-rs needs to accept both.
+        assert_eq!(parse_acl_level("read_object").unwrap(), AclLevel::Read);
         assert_eq!(parse_acl_level("write").unwrap(), AclLevel::Write);
         assert_eq!(parse_acl_level("modify object").unwrap(), AclLevel::Write);
+        assert_eq!(parse_acl_level("modify_object").unwrap(), AclLevel::Write);
         assert_eq!(parse_acl_level("own").unwrap(), AclLevel::Own);
     }
 

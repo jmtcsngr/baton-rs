@@ -10,6 +10,7 @@
 //! function here. Keeping operations out of `src/bin/` lets integration tests
 //! drive them directly.
 
+pub mod chmod;
 pub mod get;
 pub mod list;
 pub mod metamod;

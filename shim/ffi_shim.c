@@ -528,6 +528,36 @@ int shim_mod_avu(
     return rcModAVUMetadata((rcComm_t *)conn, &inp);
 }
 
+// --- Access-control (ACL) modify ---------------------------------------------
+
+int shim_mod_access_control(
+    shim_rods_conn_t *conn,
+    const char       *path,
+    const char       *level,
+    const char       *user,
+    const char       *zone,
+    int               recursive)
+{
+    if (!conn || !path || !level || !user) return -1;
+
+    modAccessControlInp_t inp;
+    memset(&inp, 0, sizeof(inp));
+
+    // iRODS uses non-const char* throughout this struct for legacy
+    // reasons; rcModAccessControl reads the strings only and does
+    // not retain them past return, so casting away const is safe.
+    inp.recursiveFlag = recursive;
+    inp.accessLevel   = (char *)level;
+    inp.userName      = (char *)user;
+    // zone may be NULL; iRODS treats both NULL and empty string as
+    // "resolve to the server's local zone", matching upstream
+    // baton's `parseUserName`-driven behaviour.
+    inp.zone          = (char *)(zone ? zone : "");
+    inp.path          = (char *)path;
+
+    return rcModAccessControl((rcComm_t *)conn, &inp);
+}
+
 // --- Error names -------------------------------------------------------------
 
 const char *shim_error_name(int code) {
