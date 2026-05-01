@@ -289,7 +289,7 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 5 — baton-get and baton-put
 
-**Status:** in progress (started 2026-04-29)
+**Status:** completed on 2026-05-01
 
 **Goal:** Download (inline and `--save`) and upload with streaming MD5 verification. Replicate handling.
 
@@ -302,17 +302,48 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 - **Streaming MD5 on put.** Compute MD5 client-side as bytes are streamed through `rcDataObjWrite`, request a server-side checksum via `rcDataObjChksum`, compare for `--verify`. For `--checksum`-only, skip the client-side hash. Avoids reading the input file twice.
 - **Replicate sizing rule.** Mirror upstream baton: report the size of the highest-numbered replica with `DATA_REPL_STATUS = 1` (a "good" replica). Decision captured in code in 5b alongside the implementation.
 
-**Completed:**
-- `<fill in>`
+**Completed (single working branch `feat/session-5-get-put`, 26 commits):**
+
+- **Shim surface** (`shim/ffi_shim.{h,c}`, mirrored in `src/ffi.rs`) — read primitives (`shim_data_obj_open` / `_read` / `_close`, `SHIM_OPEN_READ`), write primitives (`shim_data_obj_write`, `SHIM_OPEN_WRITE`), checksum primitive (`shim_data_obj_checksum`), and `SHIM_COL_DATA_SIZE` for replicate-aware catalog queries. Every addition follows the convention adopted in Session 4.5 (declare-implement-mirror).
+- **Connection layer** (`src/connection.rs`) — `OpenMode { Read, Write }`, public `open_data_object` / `read_data_object` / `write_data_object` / `close_data_object` / `checksum_data_object` methods, `ReconnectingSession` watchdog wrapper, `parse_connect_time` clap value parser, `DEFAULT_CONNECT_TIME_SECS` (600) / `MIN_CONNECT_TIME_SECS` (10) constants.
+- **`operations::get`** — `get_one` / `get_one_annotated` with two modes: inline (base64 in the output `data` field) and `--save` (streams to `<input.directory>/<input.data_object>` on disk, omits `data`). Collection inputs are an error. 64 KiB chunked read loop; `fsync` after the save completes. Per-record `directory` field on `DataObject` matches upstream baton's wire shape.
+- **`operations::put`** (new module) — `put_one` / `put_one_annotated` streaming a local file up to iRODS via `OpenMode::Write`. `--checksum` populates the output digest from `rcDataObjChksum` after close. `--verify` additionally hashes bytes client-side and compares — pure-function helpers `checksums_match` (prefix-stripping + case-insensitive bool) and `verify_checksum` (Result-wrapping the comparison) carry the unhappy-path logic so it's unit-testable without driving real iRODS. `--verify` implies `--checksum` on the output. `SHIM_OPEN_WRITE` is `O_WRONLY | O_CREAT | O_TRUNC` — overwrite-on-collision matches `iput -f`.
+- **`operations::list`** — replicate-aware sizing: when `--size` or `--checksum` is on, query the catalog for `(repl_num, size, checksum, status)`, pick the highest-numbered valid replica's values. `pick_canonical_replica` extracted as a pure function for unit-testing. Falls back to the existing `rcObjStat` values when no replica has `status == 1`.
+- **Types** (`src/types.rs`) — `DataObject.data: Option<String>` (base64 inline content) and `DataObject.directory: Option<String>` (per-record save destination). All struct literals across the crate and integration tests grew the new fields.
+- **Binaries** — `baton-put` wired from the Session 1 stub; `baton-get` grew `--save`. All five active binaries (`baton-list`, `baton-get`, `baton-put`, `baton-metamod`, `baton-metaquery`) gained `--connect-time / -c <seconds>` (default 600, min 10) wired through `ReconnectingSession`. The watchdog only fires *between* records, mirroring upstream's pthread-based design but without the pthread (Rust's NDJSON loop is single-threaded synchronous). `baton-chmod` and `baton-do` remain Session 1 stubs awaiting their sessions.
+- **CI matrix** stayed green at every push across 4.2.7 / 4.3.4 / 4.3.5. No matrix changes.
+- **Dependencies** — `base64 = "0.22"` added as a runtime dep (5a). `md5 = "0.7"` added in 5b's `--checksum` cross-check tests as a `[dev-dependencies]` entry, then promoted to a runtime dep in 5b's `--verify` commit. `Cargo.lock` formally gitignored (decision from the Session 4.5 audit, surfaced again here and acted on).
+- **Tests** — extensive integration coverage: get inline (full byte-range, empty file, multi-chunk, 30 MB stress, sequential, recovery, three chunk-boundary sizes ±1, special characters in path); get save (round-trip, multi-chunk, missing directory, missing destination, overwrite); put (round-trip, multi-chunk, overwrite, empty file, sequential, recovery, missing inputs, collection input); --checksum (populates field, matches independent MD5, post-overwrite reflects new bytes); --verify (clean upload, multi-chunk); reconnect (zero-threshold force-reconnect, conventional-threshold no-op). Unit tests cover `pick_canonical_replica` (6 cases), `checksums_match` / `verify_checksum` (8 cases), and the `--connect-time` threshold logic (5 cases).
 
 **Deferred / known gaps:**
-- `<fill in>`
+
+- **Per-record `file` field** on `DataObject` for renamed local paths in `--save` / `baton-put`. Upstream baton resolves `<directory>/<file>` first, falling back to `<directory>/<data_object>`; we currently do only the fallback. Real wire-format compat gap, intentionally out-of-scope. Tracked as #30.
+- **Pluggable hash-scheme support** (`BATON_HASH_SCHEME`). MD5 stays the only client-side scheme. iRODS 4.x server default for `default_hash_scheme` is actually SHA256 — upstream baton fails `--verify` on default-config zones. baton-rs has the chance to do better than baton here once compat is in. Implementation tracked as #31; companion CI matrix as #27. Both blocked on full baton functional compat (Session 8).
+- **Upstream CLI-flag gap** — baton has many flags we don't yet expose: `--unsafe`, `--unbuffered`, `--no-clobber`, `--file`, `--buffer-size`, `--raw` (get), `--wlock`, `--single-server`, `--redirect` (put). Plus `--avu` / `--acl` / `--size` / `--timestamp` on `baton-get` (we have these on `baton-list` and they reuse `enrich_with_metadata`). All Session 8 polish — bulk pass rather than one-off additions.
+- **iRODS 5.x in CI matrix** — still deferred to Session 8.
+- **Path-traversal hardening** on `--save` — current behaviour mirrors upstream's `make_file_path`; deviating would be a deliberate Session 8 decision.
+- **Reconnect-failure-path test** — hard to fault-inject without a test-only shim hook. The contract is documented as fail-fast in `ReconnectingSession::maybe_reconnect`; defer the test to Session 8 if the path becomes load-bearing.
 
 **Decisions made:**
-- `<fill in>`
 
-**Open questions for next session:**
-- `<fill in>`
+- **Per-record `directory` field on `DataObject`** for the `--save` and put destinations. Modelled flat on the existing struct rather than as a wrapping envelope, because that matches upstream baton's wire shape exactly (`{collection, data_object, directory}`).
+- **`--checksum` and `--verify` are mutually exclusive at the CLI** via clap's `conflicts_with`. Matches upstream's documented surface: `--verify` is a strict superset (it computes server-side too), so passing both has no useful meaning.
+- **`--verify` implies `--checksum` on the output.** Once we've fetched the server digest for the comparison there's no reason to drop it on the floor.
+- **`--connect-time` wired in 5c rather than deferred** to Session 8. The implementation turned out small (`ReconnectingSession` + 5 binary wiring sites) and the alternative was leaving the binaries with no auto-reconnect for an indeterminate time. Default 600s, min 10s — matches upstream `baton.h:34` / `operations.c:77-83` exactly. Between-records-only semantics (no mid-stream preemption) also match upstream.
+- **MD5 is an integrity claim, not a security claim.** Documented in `operations::put`'s module doc. The threat model for `--verify` is detecting accidental corruption (network, disk) by an honest client / server, not adversarial collisions. SHA2 path is gated on #31 / #27 landing.
+- **`--verify` mismatch leaves bytes on the server.** Matches upstream — the binary doesn't auto-clean failed verifies. The user gets a `BatonError` carrying both digests and decides.
+- **Path traversal in `--save` / `baton-put` mirrors upstream baton.** No `..` rejection, no symlink protection on `File::create`. Threat model: operator-trusted input. Hardening would deviate from upstream.
+- **Replicate-aware sizing applies to both `--size` and `--checksum`** together. The mental model is "the canonical state of this data object" — size and checksum should describe the same replica.
+- **`pick_canonical_replica` extracted as a pure function** so the selection rule (skip non-status-1, pick max repl_num, silently skip unparseable rows) is unit-testable without driving real iRODS.
+- **`Cargo.lock` formally gitignored.** The crate is treated as a library — gitignoring the lockfile lets downstream consumers' lockfiles drive resolution. Decision from Session 4.5's audit, formalised here.
+- **`md5` crate** chosen for client-side hashing (small, simple `Context::new` / `consume` / `compute` API). Pluggable scheme work (#31) will likely swap to RustCrypto's `md-5` + `sha2` behind the `digest::Digest` trait — that's the substantive piece.
+
+**Open questions for next session (Session 6 — baton-chmod):**
+
+- iRODS API for ACL modification — is there a single `rcModAccessControl` call, or do permission grants/revokes need to be composed? A new shim primitive is almost certainly needed.
+- `--recurse` semantics: depth-first / breadth-first; serial through one connection; how does the per-input failure annotation interact with partial recursion?
+- Inheritance: how do iRODS's inherit-bit semantics map onto the JSON model? Is it part of an ACL entry or a separate flag?
+- Owner-zone defaulting: input ACL records may omit `zone`; does baton infer from server's local zone, or require explicit?
 
 ---
 
@@ -406,3 +437,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-28` — Session 4 completed across three branches: 4a (extract enrich_with_metadata), 4b (baton-metamod via rcModAVUMetadata), 4c (baton-metaquery with single/multi-AVU + timestamp + ACL + scope). First binary that mutates iRODS state and first that uses the Operator enum from Session 1.
 - `2026-04-29` — Session 4.5 completed: C shim landed, bindgen and libclang dropped from the build entirely, iRODS 4.2.7 flipped back to strict (issue #9 closed). Issue #25 (4.2.7 replResc checksum-algorithm divergence) closed by pinning `irods_default_hash_scheme = MD5` in the client environment. New cross-cutting convention: every iRODS API call goes through `shim/ffi_shim.{c,h}` mirrored in `src/ffi.rs`.
 - `2026-04-29` — Session 5 started on branch `feat/session-5-get-put`. Split into 5a/5b/5c; up-front decisions on streaming MD5 (client-side on put) and replicate sizing (highest-numbered valid replica). `--connect-time` wiring deferred to 5c.
+- `2026-05-01` — Session 5 completed. `baton-get` (inline + `--save`) and `baton-put` (streaming MD5, `--checksum`, `--verify`) landed; replicate-aware sizing wired into `baton-list` for `--size` / `--checksum`; `--connect-time` wired across all five active binaries via the `ReconnectingSession` watchdog (default 600s, min 10s, between-records only — matches upstream). `base64` added as a runtime dep; `md5` promoted from dev-dep to runtime dep. Three follow-up issues opened: #30 (per-record `file` field for renamed local paths), #31 (pluggable `BATON_HASH_SCHEME`), #27 (companion CI matrix for the hash-scheme axis). Session tracked in #28.
