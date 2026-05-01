@@ -8,6 +8,7 @@ license = "GPL-2.0"
 anyhow             = "1"
 base64             = "0.22"
 clap               = { version = "4", features = ["derive"] }
+md5                = "0.7"
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 thiserror          = "2"
@@ -16,9 +17,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 cc = "1"
-
-[dev-dependencies]
-# Used by tests/put.rs to compute an independent MD5 of test payloads
-# for cross-checking the server-side digest baton-put returns under
-# --checksum. Promoted to a runtime dep in 5b's --verify commit.
-md5 = "0.7"

@@ -456,6 +456,140 @@ fn put_without_checksum_leaves_checksum_field_unset() {
     );
 }
 
+// --- --verify mode -----------------------------------------------------------
+//
+// Unhappy-path coverage for --verify lives in operations::put's unit
+// tests for `checksums_match` and `verify_checksum` — those exercise
+// the comparison logic and the error-message shape directly, without
+// having to fault-inject a real client/server byte mismatch (which
+// would require either a test-only hook on PutOptions or a race
+// against the post-close digest call). The integration tests below
+// pin the happy-path wiring: a clean upload through --verify
+// returns Ok and populates the checksum field even though --checksum
+// wasn't explicitly set.
+
+#[test]
+fn put_with_verify_succeeds_on_clean_upload() {
+    // Smoke test: --verify on a clean upload (server bytes match
+    // local bytes by construction) returns Ok and populates the
+    // checksum field. Confirms the verify branch is wired in and
+    // doesn't false-fail on an honest upload.
+    let upload_dir = "/tmp/baton_rs_put_verify_basic_dir";
+    let data_object = "baton_rs_put_verify_basic_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, data_object));
+    std::fs::write(&upload_local, b"verify me").expect("write source");
+    let _local_cleanup = LocalCleanup(upload_local);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let opts = PutOptions {
+        checksum: false,
+        verify: true,
+    };
+    let output = put_one(&mut conn, input, &opts).expect("put_one with --verify");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    // --verify implies --checksum on the output: a successful verify
+    // populates the checksum field even though the caller didn't
+    // explicitly set --checksum. Indirectly proves put_one actually
+    // ran the verify branch — if it had skipped the branch the field
+    // would still be None.
+    assert!(
+        d.checksum.is_some(),
+        "--verify should populate the checksum field on success; got {:?}",
+        d.checksum,
+    );
+}
+
+#[test]
+fn put_with_verify_succeeds_on_multi_chunk_upload() {
+    // ~200 KiB payload — the streaming-MD5 context consumes ~3
+    // chunks via stream_file_to_handle. A bug in chunk-boundary
+    // hashing (wrong slice, missed bytes between iterations) would
+    // produce a client digest that disagrees with iRODS's compute
+    // over the actual server-side bytes, and verify_checksum would
+    // surface the mismatch as an error.
+    //
+    // Belt-and-braces: cross-check the populated checksum against
+    // an independently-computed MD5 of the source bytes. Same shape
+    // as the --checksum cross-check, but routed through the verify
+    // path so a passing verify_checksum is also proved to have
+    // hashed the right bytes.
+    let upload_dir = "/tmp/baton_rs_put_verify_multi_dir";
+    let data_object = "baton_rs_put_verify_multi_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, data_object));
+    let content: Vec<u8> = (0u8..=255u8).cycle().take(200 * 1024).collect();
+    std::fs::write(&upload_local, &content).expect("write source");
+    let _local_cleanup = LocalCleanup(upload_local);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let opts = PutOptions {
+        checksum: false,
+        verify: true,
+    };
+    let output =
+        put_one(&mut conn, input, &opts).expect("put_one with --verify multi-chunk");
+    let d = match output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    let server_chksum = d
+        .checksum
+        .as_deref()
+        .expect("--verify should populate the checksum field on success")
+        .to_lowercase();
+    let local_md5 = md5_hex(&content);
+    // contains() rather than == so a future server image surfacing
+    // an "MD5:" prefix doesn't false-fail; bare hex is the expected
+    // shape under the pinned MD5 client default.
+    assert!(
+        server_chksum.contains(&local_md5),
+        "checksum populated by --verify should match independent MD5: \
+         server={server_chksum:?} local={local_md5:?}"
+    );
+}
+
 // --- error / typed-error cases -----------------------------------------------
 
 #[test]

@@ -10,10 +10,13 @@
 //! source via `directory` (the local file is `<directory>/<data_object>`).
 //! Same name on both sides; renaming is out of scope.
 //!
-//! `--checksum` (server-side digest after upload) and `--verify`
-//! (client-side streaming MD5 + server compare) land in the next two
-//! commits. The `PutOptions` flags are present here so the API
-//! shape doesn't churn.
+//! `--checksum` populates the output `checksum` field with iRODS's
+//! post-close digest. `--verify` additionally hashes bytes
+//! client-side as they stream up and compares against iRODS's
+//! digest after close — mismatch surfaces as an in-band annotated
+//! error. `--verify` implies `--checksum` on the output: the digest
+//! is in hand by the time we compare, and dropping it would be
+//! arbitrary.
 
 use std::fs::File;
 use std::io::Read;
@@ -33,9 +36,11 @@ pub struct PutOptions {
     /// for issue #25), `sha2:<base64>` for SHA2.
     pub checksum: bool,
 
-    /// Compute MD5 client-side as bytes are streamed up, then
-    /// compare against the server's checksum after close. Mismatch
-    /// surfaces as a per-input error. Wired in the next commit.
+    /// Compute MD5 client-side as bytes are streamed up, compare
+    /// against the server's digest after close, and surface any
+    /// mismatch as a per-input error. Implies the `checksum` flag's
+    /// effect on the output (the field is populated whether or not
+    /// the verify step is also requested).
     pub verify: bool,
 }
 
@@ -52,9 +57,11 @@ const WRITE_CHUNK_SIZE: usize = 64 * 1024;
 ///   - `directory`: local source directory; the file at
 ///     `<directory>/<data_object>` is uploaded
 ///
-/// The output is the input record echoed unchanged. The
-/// `--checksum` and `--verify` flags will populate the `checksum`
-/// field once they're wired (next two commits).
+/// The output is the input record echoed back, with `checksum`
+/// populated when `opts.checksum` or `opts.verify` is set. On a
+/// `--verify` mismatch the bytes are left on the server (baton-rs
+/// follows upstream baton in not auto-cleaning failed verifies); the
+/// caller gets a `BatonError` whose message names both digests.
 ///
 /// Collections are an error: there's nothing to put for a
 /// collection. Matches the symmetric behaviour of [`crate::operations::get::get_one`].
@@ -89,8 +96,18 @@ pub fn put_one(
         message: format!("could not open local file {}: {}", local_path.display(), e),
     })?;
 
+    // Client-side MD5 is only computed when --verify is set. Allocate
+    // the hashing context up front so the streamer can update it in
+    // place chunk by chunk rather than going back over the bytes
+    // afterwards.
+    let mut hash = if opts.verify {
+        Some(md5::Context::new())
+    } else {
+        None
+    };
+
     let handle = conn.open_data_object(&path, OpenMode::Write)?;
-    let stream_result = stream_file_to_handle(conn, handle, &mut file);
+    let stream_result = stream_file_to_handle(conn, handle, &mut file, hash.as_mut());
     // Close on every path. iRODS server-side state for the L1
     // descriptor lives until close; failing to close on the error
     // path would leak the descriptor for the lifetime of the
@@ -101,10 +118,25 @@ pub fn put_one(
 
     // Server-side checksum runs after close — `rcDataObjChksum`
     // operates on the catalog state, not the in-flight L1 descriptor.
-    // Done unconditionally when --checksum is set; a future --verify
-    // path will also need the digest, so no point splitting the call.
-    if opts.checksum {
-        data_obj.checksum = Some(conn.checksum_data_object(&path)?);
+    // --verify implies --checksum on the output: once we've asked the
+    // server for its digest there's no reason to drop it on the
+    // floor, and the user gets one less flag combination to remember.
+    if opts.checksum || opts.verify {
+        let server_chksum = conn.checksum_data_object(&path)?;
+        if let Some(ctx) = hash {
+            // `ctx.compute()` consumes the context and returns a
+            // Digest that formats as 32 lowercase hex via {:x}.
+            let client_hex = format!("{:x}", ctx.compute());
+            // verify_checksum returns Err on mismatch; the caller
+            // (put_one_annotated, in the binary's NDJSON loop)
+            // surfaces it as an in-band annotation. The mismatched
+            // bytes are left on the server — baton-rs follows
+            // upstream baton in not auto-cleaning failed verifies.
+            // The error message carries both digests for diagnosis.
+            verify_checksum(&client_hex, &server_chksum)?;
+        }
+        // Reached only on --checksum-only or on a successful --verify.
+        data_obj.checksum = Some(server_chksum);
     }
 
     Ok(Target::DataObject(data_obj))
@@ -134,10 +166,16 @@ pub fn put_one_annotated(
 /// `write_data_object` are re-issued for the remainder, even though
 /// iRODS doesn't typically short-write — defensive for when iRODS's
 /// internals change.
+///
+/// When `hash` is `Some`, each chunk is fed into the MD5 context
+/// before it's written, so the same byte sequence that goes to iRODS
+/// is hashed on the client side. The single-pass design avoids
+/// re-reading the file for the verify path.
 fn stream_file_to_handle<R: Read>(
     conn: &mut RodsConnection,
     handle: i32,
     file: &mut R,
+    mut hash: Option<&mut md5::Context>,
 ) -> Result<(), BatonError> {
     let mut buf = vec![0u8; WRITE_CHUNK_SIZE];
     loop {
@@ -147,6 +185,9 @@ fn stream_file_to_handle<R: Read>(
         })?;
         if n == 0 {
             break;
+        }
+        if let Some(h) = hash.as_deref_mut() {
+            h.consume(&buf[..n]);
         }
         let mut written = 0;
         while written < n {
@@ -162,4 +203,152 @@ fn stream_file_to_handle<R: Read>(
         }
     }
     Ok(())
+}
+
+// --- checksum comparison -----------------------------------------------------
+
+/// Test whether a client-computed hex digest agrees with iRODS's
+/// `rcDataObjChksum` output. Server-side digests may carry an
+/// algorithm prefix (e.g. `MD5:abcd...` or `sha2:<base64>`); this
+/// strips anything before the first colon and does a case-insensitive
+/// ASCII compare on what remains. With the MD5 client default pinned
+/// for issue #25 the server typically returns bare hex, but the
+/// stripping keeps the comparison robust if an iRODS image surfaces a
+/// prefix.
+///
+/// Crate-private so it stays adjacent to the verify path. Exercised
+/// by the unit tests below.
+pub(crate) fn checksums_match(client_hex: &str, server: &str) -> bool {
+    let server_digest = match server.split_once(':') {
+        Some((_algo, digest)) => digest,
+        None => server,
+    };
+    client_hex.eq_ignore_ascii_case(server_digest)
+}
+
+/// Wrap [`checksums_match`] with the error-construction the put path
+/// uses on a mismatch. Kept separate so the polarity (we error on
+/// mismatch, not on match) and the message shape are independently
+/// pinnable in unit tests, without the test having to drive a real
+/// iRODS connection.
+pub(crate) fn verify_checksum(
+    client_hex: &str,
+    server: &str,
+) -> Result<(), BatonError> {
+    if checksums_match(client_hex, server) {
+        Ok(())
+    } else {
+        Err(BatonError {
+            code: -1,
+            message: format!(
+                "checksum mismatch after put: client {} != server {}",
+                client_hex, server
+            ),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksums_match_returns_true_on_exact_match() {
+        assert!(checksums_match(
+            "abcdef0123456789",
+            "abcdef0123456789",
+        ));
+    }
+
+    #[test]
+    fn checksums_match_strips_md5_prefix_on_server_side() {
+        // Some iRODS images surface a `MD5:` prefix; we tolerate it.
+        assert!(checksums_match(
+            "abcdef0123456789",
+            "MD5:abcdef0123456789",
+        ));
+    }
+
+    #[test]
+    fn checksums_match_handles_sha2_format() {
+        // SHA2 is out of scope for 5b's MD5-only client, but the
+        // prefix-stripping path runs the same way; pin it so a future
+        // matrix-test (issue #27) can plug in without rewriting the
+        // comparison.
+        assert!(checksums_match(
+            "deadbeefcafe",
+            "sha2:deadbeefcafe",
+        ));
+    }
+
+    #[test]
+    fn checksums_match_is_case_insensitive_on_ascii() {
+        // md5 crate emits lowercase hex; server may return upper or
+        // mixed case across iRODS versions.
+        assert!(checksums_match(
+            "ABCDEF0123456789",
+            "abcdef0123456789",
+        ));
+        assert!(checksums_match(
+            "abcdef0123456789",
+            "ABCDEF0123456789",
+        ));
+    }
+
+    #[test]
+    fn checksums_match_returns_false_on_mismatch() {
+        // The unhappy-path core: differing digests must fail the
+        // comparison even when both are bare hex of the same length.
+        assert!(!checksums_match(
+            "abcdef0123456789",
+            "fedcba9876543210",
+        ));
+    }
+
+    #[test]
+    fn checksums_match_returns_false_on_mismatch_with_prefix() {
+        // Prefix-stripping must not create a false positive — only
+        // the post-colon digest is compared.
+        assert!(!checksums_match(
+            "abcdef0123456789",
+            "MD5:fedcba9876543210",
+        ));
+    }
+
+    #[test]
+    fn verify_checksum_ok_on_match() {
+        assert!(verify_checksum("abcdef", "abcdef").is_ok());
+    }
+
+    #[test]
+    fn verify_checksum_err_on_mismatch_with_informative_message() {
+        let err = verify_checksum("abcdef", "fedcba").unwrap_err();
+        // The caller surfaces this through put_one_annotated; its
+        // diagnostic value comes from naming both digests so the
+        // user can compare them directly.
+        assert!(
+            err.message.contains("abcdef"),
+            "error message should name the client digest: {:?}",
+            err
+        );
+        assert!(
+            err.message.contains("fedcba"),
+            "error message should name the server digest: {:?}",
+            err
+        );
+        assert!(
+            err.message.contains("mismatch"),
+            "error message should mention 'mismatch': {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn verify_checksum_polarity_errs_only_on_mismatch() {
+        // Belt-and-braces against a future refactor accidentally
+        // negating the comparison: match → Ok, mismatch → Err. Both
+        // directions pinned.
+        assert!(verify_checksum("aa", "aa").is_ok());
+        assert!(verify_checksum("aa", "bb").is_err());
+    }
 }
