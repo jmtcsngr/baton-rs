@@ -106,6 +106,7 @@ pub const SHIM_COL_DATA_ACCESS_NAME: shim_col_t = 21;
 pub const SHIM_COL_COLL_USER_NAME: shim_col_t = 22;
 pub const SHIM_COL_COLL_USER_ZONE: shim_col_t = 23;
 pub const SHIM_COL_COLL_ACCESS_NAME: shim_col_t = 24;
+pub const SHIM_COL_DATA_SIZE: shim_col_t = 25;
 
 // ---- Data object read/write -------------------------------------------------
 

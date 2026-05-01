@@ -194,6 +194,7 @@ static int translate_col(shim_col_t col) {
     case SHIM_COL_COLL_USER_NAME:        return COL_COLL_USER_NAME;
     case SHIM_COL_COLL_USER_ZONE:        return COL_COLL_USER_ZONE;
     case SHIM_COL_COLL_ACCESS_NAME:      return COL_COLL_ACCESS_NAME;
+    case SHIM_COL_DATA_SIZE:             return COL_DATA_SIZE;
     }
     return -1;
 }

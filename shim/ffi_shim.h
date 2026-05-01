@@ -152,6 +152,7 @@ typedef enum {
     SHIM_COL_COLL_USER_NAME        = 22,
     SHIM_COL_COLL_USER_ZONE        = 23,
     SHIM_COL_COLL_ACCESS_NAME      = 24,
+    SHIM_COL_DATA_SIZE             = 25,
 } shim_col_t;
 
 // Allocate a fresh query builder. Returns NULL on out-of-memory.
