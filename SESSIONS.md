@@ -349,21 +349,56 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 
 ### Session 6 — baton-chmod
 
-**Status:** `<not started>`
+**Status:** completed on 2026-05-01
 
-**Goal:** ACL modification with `--recurse` support.
+**Goal:** ACL modification with `--recurse` support. Single binary, single working branch `feat/session-6-chmod`. Settled the five open questions from Session 5 via an upstream gap-analysis pass before any code landed (issue #33).
 
-**Completed:**
-- `<fill in>`
+**Completed (8 commits):**
+
+- **Shim primitive** (`shim/ffi_shim.{h,c}`, mirrored in `src/ffi.rs`) — `shim_mod_access_control` wrapping `rcModAccessControl`. Builds the `modAccessControlInp_t` internally; takes path / level / user / zone / recursive flag. NULL or empty zone resolves to the server's local zone (matches upstream's `parseUserName`-driven behaviour). One call per (path, user, level) tuple; multi-grant ACL lists iterate.
+- **`AclLevel::as_irods_str`** (`src/types.rs`) — bare lowercase strings (`"null"` / `"read"` / `"write"` / `"own"`) the iRODS C API wants, distinct from the serde JSON representation. Pinned to upstream's exact set (`baton/src/query.h:52-55`); anything outside surfaces as `CAT_INVALID_ARGUMENT` server-side.
+- **`RodsConnection::mod_access_control`** — typed wrapper composing CStrings for path / level / user / zone, delegating to the shim, error-wrapping any non-zero return. Mirrors `mod_avu`'s shape from Session 4b.
+- **`operations::chmod`** (`src/operations/chmod.rs`, new module) — `ChmodOptions { recursive: bool }`, `chmod_one`, `chmod_one_annotated`. Iterates `target.access[]` and dispatches one shim call per entry. Empty / absent access is a no-op success; output echoes the input. `recursive` masked to `false` for data-object targets client-side. **Breaks on the first failing entry** within an `access[]` array — matches upstream baton (`baton/src/operations.c:420`); accumulate-instead-of-break alternative tracked in #34.
+- **`baton-chmod` binary** wired from the Session 1 stub. Same NDJSON harness as the other binaries: `--recurse / -r`, `--connect-time / -c`, `--verbose / -v`, `--silent`. Per-input failures annotate the `error` field and the stream continues. baton-chmod was the sixth of seven baton binaries to gain its real implementation; only `baton-do` (Session 7) remains a stub.
+- **`parse_acl_level` 4.3.x fix** (`src/operations/list.rs`) — extended to accept iRODS 4.3.x's underscore-separated forms (`read_object`, `modify_object`) alongside the existing compact (`read`) and 4.2.x verbose (`read object`) forms. Surfaced by Session 6's chmod tests on 4.3.4 — earlier list-only tests didn't trip the gap because they only read the default-server ACL state, which uses the verbose form. Covered by an extended unit test.
+- **`--recurse` footgun documentation** in both the binary's clap help (`baton-chmod --help`) and the `operations::chmod` module doc — server-side walk has no client-side ceiling, matching upstream baton (and iRODS itself, which has no max-depth bound). Surfaced by the pre-PR audit; surfacing it in code so reviewers and users don't have to deduce it from the absence of recursion logic.
+- **Tests** — 10 integration tests in `tests/chmod.rs` (grant `read` to `public` group with zone-defaulting, null-revoke, multi-ACL with second-wins, missing user / missing path annotated errors, `--recurse` on a populated collection covering parent + sub-collection + child data object, empty access no-op for both `Some(vec![])` and `None`, **break-on-first-failure** load-bearing pin, recovery-after-error on same connection, data-object target with `recursive=true` to pin the client-side mask + echo byte-equality). Verification goes through `list_one --acl` rather than parsing `ils -A` — the well-tested ACL reader is the right oracle for "what's recorded right now".
+- **Audit pass** — pre-PR sweep across consistency, dependencies, security, docs, and test coverage. Findings either fixed (date bumps, missing data-object test, echo-pin) or flagged for future sessions (pre-existing `tracing` direct-dep unused, sequential-good-then-good test deemed skippable since recovery covers the surface).
 
 **Deferred / known gaps:**
-- `<fill in>`
+
+- **Accumulate-instead-of-break for per-grant errors in `access[]` arrays.** Tracked as #34. baton-rs currently mirrors baton's `goto finally` semantics for upstream-compat parity. Worth revisiting once full functional compat is in place and downstream feedback (partisan) flags the silent-skip behaviour as confusing.
+- **No sequential good-then-good chmod test on the same connection.** Recovery-after-error test exercises bad-then-good; explicit good-then-good was deemed redundant with the recovery coverage. Symmetry argument with put / get tests; revisit if a regression surfaces.
+- **Explicit `zone` value never exercised** on input. All chmod tests omit `zone` and rely on local-zone defaulting; the test container is single-zone so `Some("testZone")` is server-side equivalent. Genuine gap, requires a multi-zone fixture (Session 8 polish or later).
+- **`tracing = "0.1"` is an unused direct dep** in `Cargo.toml`. Pre-existing from Session 1 scaffold; only `tracing_subscriber` is actually `use`d. Either drop the entry or wire `tracing::instrument` in a later session. Not a Session 6 regression.
+- Inherited-from-earlier deferrals stay in scope for later sessions: per-record `file` field (#30), pluggable `BATON_HASH_SCHEME` (#31, #27), iRODS 5.x in CI (Session 8), upstream CLI-flag gap (`--unsafe` / `--unbuffered` / `--no-clobber` / `--file` / `--buffer-size`, plus `--avu` / `--acl` / `--size` / `--timestamp` on `baton-get` — Session 8).
 
 **Decisions made:**
-- `<fill in>`
 
-**Open questions for next session:**
-- `<fill in>`
+All five gap-analysis questions from Session 5's carry-forward were settled with citations to upstream baton's source (recorded in #33):
+
+- **API shape** — one `rcModAccessControl` call per (path, owner, level). No batching, no diff. Mirrors `baton/src/baton.c:746`.
+- **Recursion** — set `recursiveFlag = 1` and let the iCAT walk server-side. baton-rs does no client-side traversal. Matches `baton/src/baton.c:729`.
+- **Inheritance** — not exposed in v1. baton itself doesn't expose it (`grep -rn inherit baton/src/` is empty). Document as a future baton-rs extension if ever needed.
+- **Owner-zone defaulting** — `zone: Option<String>` on input; `None` becomes a NULL pointer to the shim, which forwards as empty-string to iRODS, which resolves to the local zone. No client-side `getRodsEnv` probe. Matches `baton/src/baton.c:786-791`.
+- **`AclLevel` variants** — keep the existing four (`null` / `read` / `write` / `own`). serde already rejects anything else.
+- **Per-array failure handling** — break on first failure (option a, the upstream-compat default). Accumulate-instead-of-break tracked in #34 for a future session.
+- **`--recurse` server-side ceiling** — none, matching upstream. Documented in code rather than guarded.
+
+Implementation-detail choices:
+
+- **`AclLevel::as_irods_str` returns bare strings** rather than relying on `serde_json::to_string` (which would JSON-quote). Cleaner separation between the on-the-wire JSON shape and the iRODS C API contract.
+- **`pick_canonical_replica`-style extraction not needed for chmod** — the per-entry loop is simple enough that a pure-function helper would be over-engineering. Loop sits inside `chmod_one`.
+- **Verification through `list_one --acl`** rather than `ils -A` parsing — keeps test assertions out-of-process-free and exercises baton-rs's own ACL reader as a side effect.
+- **`parse_acl_level` extended in `operations::list`**, not in a new shim primitive. The fix is purely about catalog-string-string parsing on the Rust side; the shim doesn't need to know about iRODS-version-specific catalog spellings.
+
+**Open questions for next session (Session 7 — baton-do multiplexer):**
+
+- **JSON envelope shape.** PLAN.md specifies `{"operation": "...", "arguments": {...}, "target": {...}}`. Confirm against upstream baton-do's actual input shape — does `arguments` carry the per-operation flags (`recursive`, `save`, `checksum`, `verify`, etc.) or is there a different convention?
+- **Dispatch mechanism.** Function-pointer table, `match` on a `Operation` enum, or a trait? Affects how easily new operations slot in (the extra ones below).
+- **Extra operations baton-do exposes that we don't have yet:** `checksum` (server-side digest on an existing object — needs `rcDataObjChksum` exposed differently), `move` (`rcDataObjRename` / `rcCollRename`), `remove` (`rcDataObjUnlink` / `rcRmColl`), `mkdir` (`rcCollCreate`), `rmdir` (`rcRmColl` again, possibly with different flags). Each needs a new shim primitive.
+- **`--no-error` mode** — upstream baton-do's "in-band JSON errors only" flag. We already have annotated wrappers for every operation; how does `--no-error` differ? Does it suppress the process-level `Err` and only emit annotated JSON, even on parse / IO failures?
+- **Compat is the load-bearing concern** — `baton-do` is what partisan calls. The wire format and dispatch table need to match upstream byte-for-byte.
 
 ---
 
@@ -438,3 +473,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-29` — Session 4.5 completed: C shim landed, bindgen and libclang dropped from the build entirely, iRODS 4.2.7 flipped back to strict (issue #9 closed). Issue #25 (4.2.7 replResc checksum-algorithm divergence) closed by pinning `irods_default_hash_scheme = MD5` in the client environment. New cross-cutting convention: every iRODS API call goes through `shim/ffi_shim.{c,h}` mirrored in `src/ffi.rs`.
 - `2026-04-29` — Session 5 started on branch `feat/session-5-get-put`. Split into 5a/5b/5c; up-front decisions on streaming MD5 (client-side on put) and replicate sizing (highest-numbered valid replica). `--connect-time` wiring deferred to 5c.
 - `2026-05-01` — Session 5 completed. `baton-get` (inline + `--save`) and `baton-put` (streaming MD5, `--checksum`, `--verify`) landed; replicate-aware sizing wired into `baton-list` for `--size` / `--checksum`; `--connect-time` wired across all five active binaries via the `ReconnectingSession` watchdog (default 600s, min 10s, between-records only — matches upstream). `base64` added as a runtime dep; `md5` promoted from dev-dep to runtime dep. Three follow-up issues opened: #30 (per-record `file` field for renamed local paths), #31 (pluggable `BATON_HASH_SCHEME`), #27 (companion CI matrix for the hash-scheme axis). Session tracked in #28.
+- `2026-05-01` — Session 6 completed on branch `feat/session-6-chmod` (8 commits). `baton-chmod` wired with `--recurse`; settled the five gap-analysis questions from Session 5's carry-forward via upstream-source citations. Sixth of seven baton binaries with a real implementation — only `baton-do` (Session 7) remains a stub. `parse_acl_level` extended to accept iRODS 4.3.x's underscore-separated forms (`read_object` / `modify_object`); the gap was undetected before because earlier list-only tests only read default-server ACL state. One follow-up issue opened: #34 (per-grant accumulate-vs-break alternative). Session tracked in #33.
