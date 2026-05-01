@@ -65,6 +65,26 @@ pub enum AclLevel {
     Own,
 }
 
+impl AclLevel {
+    /// The bare lowercase string iRODS accepts as
+    /// `modAccessControlInp_t.accessLevel`. Identical set to upstream
+    /// baton (`baton/src/query.h:52-55`); anything outside these four
+    /// surfaces as `CAT_INVALID_ARGUMENT` from the server.
+    ///
+    /// Distinct from the serde representation: although they happen
+    /// to share the same four lowercase forms, going through
+    /// `serde_json::to_string` would JSON-quote the result. This
+    /// method returns the bare string the iRODS C API wants.
+    pub fn as_irods_str(&self) -> &'static str {
+        match self {
+            AclLevel::Null => "null",
+            AclLevel::Read => "read",
+            AclLevel::Write => "write",
+            AclLevel::Own => "own",
+        }
+    }
+}
+
 /// A single access control entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Acl {
@@ -542,6 +562,19 @@ mod tests {
             assert_eq!(parsed, level);
             assert_eq!(serde_json::to_string(&parsed).unwrap(), literal);
         }
+    }
+
+    #[test]
+    fn acl_level_as_irods_str_is_bare_lowercase() {
+        // Pin the exact strings iRODS's modAccessControlInp_t accepts.
+        // Upstream baton hardcodes the same four (baton/src/query.h:52-55);
+        // anything else triggers CAT_INVALID_ARGUMENT server-side.
+        // Distinct from serde's JSON representation, which would
+        // quote the values.
+        assert_eq!(AclLevel::Null.as_irods_str(), "null");
+        assert_eq!(AclLevel::Read.as_irods_str(), "read");
+        assert_eq!(AclLevel::Write.as_irods_str(), "write");
+        assert_eq!(AclLevel::Own.as_irods_str(), "own");
     }
 
     // --- Replicate ---

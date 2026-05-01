@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::BatonError;
 use crate::ffi;
-use crate::types::{Avu, MetamodOperation, Target};
+use crate::types::{Acl, Avu, MetamodOperation, Target};
 
 /// Default `--connect-time` threshold in seconds. Matches upstream
 /// baton's `DEFAULT_MAX_CONNECT_TIME` (600s = 10 minutes) — see
@@ -424,6 +424,72 @@ impl RodsConnection {
                 attr_c.as_ptr(),
                 value_c.as_ptr(),
                 units_ptr,
+            )
+        };
+
+        if status != 0 {
+            return Err(BatonError::from_irods(status));
+        }
+
+        Ok(())
+    }
+
+    /// Apply a single ACL grant or revoke to `target`. The level
+    /// string is sourced from [`Acl::level`] via
+    /// [`crate::types::AclLevel::as_irods_str`]; the user, optional
+    /// zone, and `recursive` flag are passed straight through.
+    ///
+    /// Wraps `shim_mod_access_control`, which builds the
+    /// `modAccessControlInp_t` and dispatches one `rcModAccessControl`
+    /// round-trip. One call per (path, owner, level) tuple — for a
+    /// multi-grant ACL list the caller iterates and re-enters.
+    /// Matches upstream baton (`baton/src/operations.c:416-421`).
+    ///
+    /// `recursive` only takes effect on collection targets — iRODS
+    /// performs the traversal server-side. baton-rs does no
+    /// client-side walk.
+    ///
+    /// `acl.zone` is optional. When `None`, the shim sends an empty
+    /// zone string and iRODS resolves to the server's local zone.
+    /// Mirrors upstream baton's `parseUserName`-driven default.
+    pub fn mod_access_control(
+        &mut self,
+        target: &Target,
+        acl: &Acl,
+        recursive: bool,
+    ) -> Result<(), BatonError> {
+        // Caller-supplied strings — interior NUL is a programmer /
+        // input error surfaced as a clean BatonError rather than a
+        // panic. The level string is internal (came from our own
+        // enum), so its CString::new can't fail; unwrap is fine.
+        let path_c = CString::new(target.path()).map_err(|_| BatonError {
+            code: -1,
+            message: "path contains interior NUL".to_string(),
+        })?;
+        let level_c = CString::new(acl.level.as_irods_str()).unwrap();
+        let user_c = CString::new(acl.owner.as_str()).map_err(|_| BatonError {
+            code: -1,
+            message: "ACL owner contains interior NUL".to_string(),
+        })?;
+        let zone_c = acl
+            .zone
+            .as_ref()
+            .map(|z| CString::new(z.as_str()))
+            .transpose()
+            .map_err(|_| BatonError {
+                code: -1,
+                message: "ACL zone contains interior NUL".to_string(),
+            })?;
+        let zone_ptr = zone_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+
+        let status = unsafe {
+            ffi::shim_mod_access_control(
+                self.conn,
+                path_c.as_ptr(),
+                level_c.as_ptr(),
+                user_c.as_ptr(),
+                zone_ptr,
+                if recursive { 1 } else { 0 },
             )
         };
 
