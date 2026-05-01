@@ -590,6 +590,148 @@ fn put_with_verify_succeeds_on_multi_chunk_upload() {
     );
 }
 
+// --- connection-reuse cases --------------------------------------------------
+
+#[test]
+fn put_handles_sequential_calls_on_same_connection() {
+    // baton-put keeps a single RodsConnection alive across every
+    // input record in the NDJSON stream. Pin that one
+    // open → write → close cycle leaves no residual state on the
+    // connection: a second put against a different object after the
+    // first must produce that object's bytes — not the previous
+    // object's, not a truncated copy, not an iRODS error.
+    let upload_dir = "/tmp/baton_rs_put_seq_dir";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+
+    let object_a = "baton_rs_put_seq_a";
+    let object_b = "baton_rs_put_seq_b";
+    let bytes_a: &[u8] = b"first object content";
+    let bytes_b: &[u8] = b"second OBJECT content";
+    let local_a = PathBuf::from(format!("{}/{}", upload_dir, object_a));
+    let local_b = PathBuf::from(format!("{}/{}", upload_dir, object_b));
+    std::fs::write(&local_a, bytes_a).expect("write a");
+    std::fs::write(&local_b, bytes_b).expect("write b");
+    let _local_cleanup_a = LocalCleanup(local_a);
+    let _local_cleanup_b = LocalCleanup(local_b);
+
+    let remote_coll = "/testZone/home/irods";
+    let remote_a = format!("{}/{}", remote_coll, object_a);
+    let remote_b = format!("{}/{}", remote_coll, object_b);
+    let _cleanup_a = IrodsCleanup(remote_a);
+    let _cleanup_b = IrodsCleanup(remote_b);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let make_input = |name: &str| -> Target {
+        Target::DataObject(DataObject {
+            collection: remote_coll.to_string(),
+            data_object: name.to_string(),
+            size: None,
+            checksum: None,
+            data: None,
+            directory: Some(upload_dir.to_string()),
+            avus: None,
+            access: None,
+            replicates: None,
+            timestamps: None,
+            error: None,
+        })
+    };
+
+    // Two sequential puts on the same connection. If the first leaks
+    // any state (open L1 descriptor, dangling kw, etc.) the second
+    // would either error or write the wrong bytes.
+    put_one(&mut conn, make_input(object_a), &PutOptions::default()).expect("put a");
+    put_one(&mut conn, make_input(object_b), &PutOptions::default()).expect("put b");
+
+    // Same connection round-trips both reads. fetch_inline_bytes
+    // reuses get_one, which is itself well-tested in tests/get.rs.
+    let fetched_a = fetch_inline_bytes(&mut conn, remote_coll, object_a);
+    let fetched_b = fetch_inline_bytes(&mut conn, remote_coll, object_b);
+    assert_eq!(fetched_a, bytes_a, "first object's bytes diverged after sequential put");
+    assert_eq!(fetched_b, bytes_b, "second object's bytes diverged after sequential put");
+}
+
+#[test]
+fn put_recovers_from_error_on_same_connection() {
+    // The annotated wrapper must not poison the connection after a
+    // per-input failure. Pin: put_one_annotated on a record whose
+    // local source is missing (annotates an error), followed by
+    // put_one on a real record (succeeds), all on the same
+    // RodsConnection. This is the actual contract the NDJSON loop
+    // in baton-put relies on — without it, the first bad input
+    // would silently break every subsequent line.
+    //
+    // We use the missing-local-file fault because it's deterministic
+    // and exits before any iRODS call. A mid-stream / network fault
+    // would be more thorough but is not reproducible from a black-
+    // box test.
+    let upload_dir = "/tmp/baton_rs_put_recover_dir";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+
+    let good_object = "baton_rs_put_recover_obj";
+    let good_bytes: &[u8] = b"recovered ok";
+    let good_local = PathBuf::from(format!("{}/{}", upload_dir, good_object));
+    std::fs::write(&good_local, good_bytes).expect("write source");
+    let _local_cleanup = LocalCleanup(good_local);
+    // Note: no file written for the bad input below — that's the
+    // fault we're injecting.
+
+    let remote_coll = "/testZone/home/irods";
+    let remote_good = format!("{}/{}", remote_coll, good_object);
+    let _cleanup = IrodsCleanup(remote_good);
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    let bad_input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: "no_local_file_for_this_record".to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    let bad_output = put_one_annotated(&mut conn, bad_input, &PutOptions::default());
+    let bad_d = match bad_output {
+        Target::DataObject(d) => d,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    assert!(
+        bad_d.error.is_some(),
+        "expected error annotation on missing-local-file input, got {:?}",
+        bad_d
+    );
+
+    // Same connection, real input now. If the previous failure
+    // leaked any state into the connection, this would either error
+    // or upload the wrong bytes.
+    let good_input = Target::DataObject(DataObject {
+        collection: remote_coll.to_string(),
+        data_object: good_object.to_string(),
+        size: None,
+        checksum: None,
+        data: None,
+        directory: Some(upload_dir.to_string()),
+        avus: None,
+        access: None,
+        replicates: None,
+        timestamps: None,
+        error: None,
+    });
+    put_one(&mut conn, good_input, &PutOptions::default())
+        .expect("put_one after annotated error on same connection");
+
+    let fetched = fetch_inline_bytes(&mut conn, remote_coll, good_object);
+    assert_eq!(fetched, good_bytes);
+}
+
 // --- error / typed-error cases -----------------------------------------------
 
 #[test]

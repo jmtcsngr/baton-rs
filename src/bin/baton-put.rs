@@ -24,6 +24,16 @@
 //! match upstream's documented surface — passing `--verify` alone
 //! gives both digest behaviours, so passing both has no useful
 //! meaning.
+//!
+//! Path bytes (collection / data_object) are passed verbatim from
+//! the input JSON, through `CString::new` (which only rejects
+//! interior NULs), into iRODS's `dataObjInp_t.objPath`. baton-put
+//! does no escaping, normalisation, or encoding conversion — UTF-8,
+//! single quotes, em-dashes etc. are just bytes the iRODS server
+//! handles or rejects on its own. There's deliberately no
+//! special-characters integration test on the put path: any
+//! observable behaviour would be testing iRODS, not baton-rs.
+//! `tests/get.rs` keeps a defensive canary on the read side.
 
 use std::io::{BufRead, Write};
 
