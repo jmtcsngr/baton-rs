@@ -560,10 +560,10 @@ impl RodsConnection {
     /// Tear down the current connection and build a fresh one in its
     /// place, re-authenticating via [`Self::login_from_auth_file`].
     ///
-    /// Use this after an idle period or a transient network failure.
-    /// A future session will drive it from a `--connect-time` CLI
-    /// flag; for now it's a manually-invoked helper that forms the
-    /// building block for that.
+    /// Driven from each binary's NDJSON loop via
+    /// [`ReconnectingSession`] when the `--connect-time` threshold
+    /// elapses; also callable directly for tests or after a
+    /// transient network failure.
     ///
     /// On failure the connection pointer is left null (from the
     /// disconnect step), so it's always safe to drop the

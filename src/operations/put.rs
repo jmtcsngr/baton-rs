@@ -271,9 +271,10 @@ mod tests {
 
     #[test]
     fn checksums_match_handles_sha2_format() {
-        // SHA2 is out of scope for 5b's MD5-only client, but the
-        // prefix-stripping path runs the same way; pin it so a future
-        // matrix-test (issue #27) can plug in without rewriting the
+        // SHA2 is out of scope for the current MD5-only client, but
+        // the prefix-stripping path runs the same way; pin it so the
+        // pluggable hash-scheme work (issue #31) and its matrix
+        // tests (issue #27) can plug in without rewriting the
         // comparison.
         assert!(checksums_match(
             "deadbeefcafe",
