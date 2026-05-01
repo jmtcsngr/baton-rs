@@ -303,6 +303,35 @@ int shim_mod_avu(
     const char       *value,
     const char       *units);
 
+// ---- Access-control (ACL) modify --------------------------------------------
+//
+// Wraps `rcModAccessControl`. Caller passes the path, the iRODS
+// permission level string (one of `"null"`, `"read"`, `"write"`,
+// `"own"` — anything else surfaces as `CAT_INVALID_ARGUMENT` from
+// the server), the target user and zone, and the recurse flag.
+//
+// `zone` may be the empty string when the caller wants iRODS to
+// resolve to the server's local zone. Upstream baton uses this
+// path: when an input ACL record omits `zone`, baton sends an empty
+// string and `parseUserName` on the server defaults to the local
+// zone. baton-rs mirrors that.
+//
+// `recursive` is `0` for single-path application or `1` to apply
+// the change to every child of a collection. iRODS does the
+// traversal server-side; the shim's caller does no client-side
+// walk.
+//
+// One call per (path, user, level) tuple — for a multi-grant ACL
+// list the caller iterates and calls this function repeatedly,
+// matching upstream baton's loop in `src/operations.c:416-421`.
+int shim_mod_access_control(
+    shim_rods_conn_t *conn,
+    const char       *path,
+    const char       *level,
+    const char       *user,
+    const char       *zone,
+    int               recursive);
+
 // ---- Error names ------------------------------------------------------------
 
 // Resolve an iRODS status code to its symbolic name (e.g.
