@@ -16,4 +16,5 @@ pub mod get;
 pub mod list;
 pub mod metamod;
 pub mod metaquery;
+pub mod mkdir;
 pub mod put;
