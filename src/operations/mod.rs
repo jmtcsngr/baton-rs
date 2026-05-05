@@ -18,3 +18,4 @@ pub mod metamod;
 pub mod metaquery;
 pub mod mkdir;
 pub mod put;
+pub mod rmdir;
