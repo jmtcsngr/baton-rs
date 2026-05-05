@@ -17,6 +17,7 @@ pub mod list;
 pub mod metamod;
 pub mod metaquery;
 pub mod mkdir;
+pub mod mv;
 pub mod put;
 pub mod rm;
 pub mod rmdir;
