@@ -23,6 +23,12 @@
 //! auto-routing.
 //!
 //! Data-object targets are an error — rmdir is collection-only.
+//!
+//! With `recurse = true`, the server-side walk has no
+//! client-side ceiling — a recursive removal on a high-level
+//! collection wipes every descendant in one call. Matches
+//! upstream baton; iRODS itself has no max-depth bound either.
+//! Use with care on large trees.
 
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
