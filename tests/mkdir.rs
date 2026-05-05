@@ -66,12 +66,19 @@ fn mkdir_creates_a_new_collection() {
         "test prerequisite: {leaf:?} should not exist before the call"
     );
 
-    mkdir_one(
-        &mut conn,
-        collection_target(leaf),
-        &MkdirOptions::default(),
-    )
-    .expect("mkdir_one should succeed against a fresh path with extant parent");
+    let input = collection_target(leaf);
+    let input_clone = input.clone();
+    let output = mkdir_one(&mut conn, input, &MkdirOptions::default())
+        .expect("mkdir_one should succeed against a fresh path with extant parent");
+
+    // Echo byte-equality on success — mkdir_one is a pure
+    // side-effect operation, so the output Target must equal the
+    // input. Pins against future regressions that mutate, drop,
+    // or reorder fields.
+    assert_eq!(
+        output, input_clone,
+        "mkdir_one should echo the input on success without mutating any field"
+    );
 
     assert!(
         collection_exists(&mut conn, leaf),
@@ -191,6 +198,54 @@ fn mkdir_on_data_object_target_is_error() {
         err.message.contains("data object"),
         "error message should mention data-object target: {:?}",
         err
+    );
+}
+
+#[test]
+fn mkdir_recovers_from_error_on_same_connection() {
+    // Failing input (missing parent without recurse → annotated
+    // error) followed by a valid input on the same RodsConnection
+    // both processed. Pins that the error path inside mkdir_one
+    // leaves the connection clean for the next iteration of the
+    // NDJSON loop — the contract baton-do's dispatcher will rely
+    // on. Mirrors the equivalent rm / chmod / put / get tests.
+    let absent_parent = "/testZone/home/irods/baton_rs_mkdir_recover_no_parent";
+    let bad_leaf = format!("{}/leaf", absent_parent);
+
+    let good_leaf = "/testZone/home/irods/baton_rs_mkdir_recover_good";
+    let _cleanup_bad = IrodsCleanup(absent_parent.to_string());
+    let _cleanup_good = IrodsCleanup(good_leaf.to_string());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // Bad input first: nested path without recurse.
+    let bad_out = mkdir_one_annotated(
+        &mut conn,
+        collection_target(&bad_leaf),
+        &MkdirOptions::default(),
+    );
+    let bad_err = match bad_out {
+        Target::Collection(c) => c.error,
+        other => panic!("expected Collection, got {:?}", other),
+    };
+    assert!(
+        bad_err.is_some(),
+        "expected error annotation on missing-parent input"
+    );
+
+    // Valid input on the same connection — should succeed even
+    // after the previous failure.
+    mkdir_one(
+        &mut conn,
+        collection_target(good_leaf),
+        &MkdirOptions::default(),
+    )
+    .expect("mkdir_one after annotated error on same connection");
+
+    assert!(
+        collection_exists(&mut conn, good_leaf),
+        "good leaf should exist after recovery"
     );
 }
 

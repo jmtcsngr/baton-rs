@@ -89,12 +89,18 @@ fn rmdir_removes_empty_collection() {
         "test prerequisite: {coll:?} should exist after imkdir"
     );
 
-    rmdir_one(
-        &mut conn,
-        collection_target(coll),
-        &RmdirOptions::default(),
-    )
-    .expect("rmdir_one against an empty collection should succeed");
+    let input = collection_target(coll);
+    let input_clone = input.clone();
+    let output = rmdir_one(&mut conn, input, &RmdirOptions::default())
+        .expect("rmdir_one against an empty collection should succeed");
+
+    // Echo byte-equality on success — rmdir_one is a pure
+    // side-effect operation, so the output Target must equal the
+    // input describing the (now-removed) collection.
+    assert_eq!(
+        output, input_clone,
+        "rmdir_one should echo the input on success without mutating any field"
+    );
 
     assert!(
         !collection_exists(&mut conn, coll),
@@ -215,6 +221,53 @@ fn rmdir_on_data_object_target_is_error() {
         err.message.contains("data object"),
         "error message should mention data-object target: {:?}",
         err
+    );
+}
+
+#[test]
+fn rmdir_recovers_from_error_on_same_connection() {
+    // Failing input (missing collection → annotated error)
+    // followed by a valid input on the same RodsConnection both
+    // processed. Pins that the error path inside rmdir_one
+    // leaves the connection clean for the next NDJSON-loop
+    // iteration. Mirrors the equivalent rm / chmod / put / get
+    // tests.
+    let good_coll = "/testZone/home/irods/baton_rs_rmdir_recover_good";
+    imkdir(good_coll);
+    let _cleanup_good = IrodsCleanup(good_coll.to_string());
+
+    let bad_coll = "/testZone/home/irods/baton_rs_rmdir_recover_bad_does_not_exist";
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // Bad input first.
+    let bad_out = rmdir_one_annotated(
+        &mut conn,
+        collection_target(bad_coll),
+        &RmdirOptions::default(),
+    );
+    let bad_err = match bad_out {
+        Target::Collection(c) => c.error,
+        other => panic!("expected Collection, got {:?}", other),
+    };
+    assert!(
+        bad_err.is_some(),
+        "expected error annotation on missing-collection input"
+    );
+
+    // Valid input on the same connection — empty collection,
+    // should be removed.
+    rmdir_one(
+        &mut conn,
+        collection_target(good_coll),
+        &RmdirOptions::default(),
+    )
+    .expect("rmdir_one after annotated error on same connection");
+
+    assert!(
+        !collection_exists(&mut conn, good_coll),
+        "good collection should have been removed despite the prior failure"
     );
 }
 

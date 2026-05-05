@@ -111,12 +111,18 @@ fn mv_renames_data_object_within_collection() {
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
 
-    mv_one(
-        &mut conn,
-        data_object_target(coll, src_object),
-        &dst_path,
-    )
-    .expect("mv_one rename");
+    let input = data_object_target(coll, src_object);
+    let input_clone = input.clone();
+    let output = mv_one(&mut conn, input, &dst_path).expect("mv_one rename");
+
+    // Echo byte-equality on success — mv_one returns the input
+    // describing the *source* path, not the destination. Pins
+    // that semantic and catches any future regression that
+    // silently rewrites the output to track the destination.
+    assert_eq!(
+        output, input_clone,
+        "mv_one should echo the input describing the source on success"
+    );
 
     assert!(
         !data_object_exists(&mut conn, coll, src_object),
@@ -289,5 +295,61 @@ fn mv_with_empty_destination_is_typed_error() {
         err.message.contains("destination"),
         "error message should mention 'destination': {:?}",
         err
+    );
+}
+
+#[test]
+fn mv_recovers_from_error_on_same_connection() {
+    // Failing input (missing source → annotated error) followed
+    // by a valid input on the same RodsConnection both processed.
+    // Pins that the error path inside mv_one leaves the
+    // connection clean for the next NDJSON-loop iteration.
+    // Mirrors the equivalent rm / chmod / put / get tests.
+    let local = "/tmp/baton_rs_mv_recover_src";
+    std::fs::write(local, b"mv recover").expect("write");
+
+    let coll = "/testZone/home/irods";
+    let good_src = "baton_rs_mv_recover_src";
+    let good_dst = "baton_rs_mv_recover_dst";
+    let good_src_path = format!("{}/{}", coll, good_src);
+    let good_dst_path = format!("{}/{}", coll, good_dst);
+    iput(local, &good_src_path);
+    let _cleanup_src = IrodsCleanup(good_src_path);
+    let _cleanup_dst = IrodsCleanup(good_dst_path.clone());
+
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // Bad input first: missing source.
+    let bad_dst_path = format!("{}/baton_rs_mv_recover_unreachable_dst", coll);
+    let bad_out = mv_one_annotated(
+        &mut conn,
+        data_object_target(coll, "definitely_not_here_baton_rs_mv_recover"),
+        &bad_dst_path,
+    );
+    let bad_err = match bad_out {
+        Target::DataObject(d) => d.error,
+        other => panic!("expected DataObject, got {:?}", other),
+    };
+    assert!(
+        bad_err.is_some(),
+        "expected error annotation on missing-source input"
+    );
+
+    // Valid input on the same connection — should rename.
+    mv_one(
+        &mut conn,
+        data_object_target(coll, good_src),
+        &good_dst_path,
+    )
+    .expect("mv_one after annotated error on same connection");
+
+    assert!(
+        !data_object_exists(&mut conn, coll, good_src),
+        "good source should have been moved despite the prior failure"
+    );
+    assert!(
+        data_object_exists(&mut conn, coll, good_dst),
+        "good destination should exist after recovery"
     );
 }

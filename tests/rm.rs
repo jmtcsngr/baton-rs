@@ -87,8 +87,18 @@ fn rm_removes_data_object() {
         "test prerequisite: object should exist after iput"
     );
 
-    rm_one(&mut conn, data_object_target(remote_coll, data_object))
+    let input = data_object_target(remote_coll, data_object);
+    let input_clone = input.clone();
+    let output = rm_one(&mut conn, input)
         .expect("rm_one should succeed against an existing data object");
+
+    // Echo byte-equality on success — rm_one is a pure
+    // side-effect operation, so the output Target must equal the
+    // input describing the (now-removed) data object.
+    assert_eq!(
+        output, input_clone,
+        "rm_one should echo the input on success without mutating any field"
+    );
 
     assert!(
         !data_object_exists(&mut conn, remote_coll, data_object),
