@@ -218,5 +218,30 @@ extern "C" {
         recursive: c_int,
     ) -> c_int;
 
+    pub fn shim_rename(
+        conn: *mut shim_rods_conn_t,
+        src_path: *const c_char,
+        dest_path: *const c_char,
+        source_is_collection: c_int,
+    ) -> c_int;
+
+    pub fn shim_data_obj_unlink(
+        conn: *mut shim_rods_conn_t,
+        path: *const c_char,
+    ) -> c_int;
+
+    pub fn shim_rm_coll(
+        conn: *mut shim_rods_conn_t,
+        path: *const c_char,
+        recurse: c_int,
+        force: c_int,
+    ) -> c_int;
+
+    pub fn shim_create_coll(
+        conn: *mut shim_rods_conn_t,
+        path: *const c_char,
+        recurse: c_int,
+    ) -> c_int;
+
     pub fn shim_error_name(code: c_int) -> *const c_char;
 }
