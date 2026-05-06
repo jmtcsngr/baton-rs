@@ -20,28 +20,23 @@
 //! is cleared on the way through so the wire shape never
 //! double-emits the annotation.
 //!
-//! ## Metaquery — deferred
-//!
-//! Metaquery is the only operation whose wire-format target
-//! doesn't fit baton-rs's existing [`Target`] type — its target
-//! is closer to [`MetaqueryInput`] (which carries `AvuQuery` /
-//! `TimestampQuery` / `AccessQuery` with operator fields, and a
-//! top-level `zone`). Mapping `Target` → `MetaqueryInput`
-//! best-effort would silently drop operators and zone scoping;
-//! that's a real wire-compat gap.
-//!
-//! Commit 2 of 7b returns a placeholder error for metaquery.
-//! Commit 3 of 7b will land the proper fix — likely a
-//! per-operation target shape on the envelope so metaquery's
-//! richer input type travels through serde without
-//! mid-dispatcher conversion.
+//! Metaquery's wire-format target is richer than the standard
+//! [`Target`] — it carries query-time operators and a `zone`
+//! scope — so [`BatonDoEnvelope`] uses an
+//! [`EnvelopeTarget`] enum that splits the target shape on the
+//! operation discriminator. Most arms here pull the standard
+//! [`Target`] via [`EnvelopeTarget::as_target`]; the metaquery
+//! arm pulls a [`MetaqueryInput`] via
+//! [`EnvelopeTarget::as_metaquery_input`].
 
 use crate::connection::RodsConnection;
 use crate::error::BatonError;
-use crate::operations::{checksum, chmod, get, list, metamod, mkdir, mv, put, rm, rmdir};
+use crate::operations::{
+    checksum, chmod, get, list, metamod, metaquery, mkdir, mv, put, rm, rmdir,
+};
 use crate::types::{
-    Arguments, BatonDoEnvelope, BatonDoOutput, MetamodInput, MetamodOperation, Operation,
-    OperationResult, Target,
+    Arguments, BatonDoEnvelope, BatonDoOutput, EnvelopeTarget, MetamodInput,
+    MetamodOperation, Operation, OperationResult, Target,
 };
 
 /// Top-level dispatcher. Always returns a [`BatonDoOutput`] —
@@ -53,11 +48,7 @@ pub fn dispatch_one(
     envelope: BatonDoEnvelope,
 ) -> BatonDoOutput {
     let (result, error) = dispatch_inner(conn, &envelope);
-    BatonDoOutput {
-        envelope,
-        result,
-        error,
-    }
+    BatonDoOutput::new(envelope, result, error)
 }
 
 fn dispatch_inner(
@@ -66,93 +57,176 @@ fn dispatch_inner(
 ) -> (Option<OperationResult>, Option<BatonError>) {
     match envelope.operation {
         Operation::List => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
             let opts = list_options_from_arguments(&envelope.arguments);
-            let out = list::list_one_annotated(conn, envelope.target.clone(), &opts);
+            let out = list::list_one_annotated(conn, target, &opts);
             split_result(out)
         }
         Operation::Get => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
             let opts = get::GetOptions {
                 save: envelope.arguments.save,
             };
-            let out = get::get_one_annotated(conn, envelope.target.clone(), &opts);
+            let out = get::get_one_annotated(conn, target, &opts);
             split_result(out)
         }
         Operation::Put => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
             let opts = put::PutOptions {
                 checksum: envelope.arguments.checksum,
                 verify: envelope.arguments.verify,
             };
-            let out = put::put_one_annotated(conn, envelope.target.clone(), &opts);
+            let out = put::put_one_annotated(conn, target, &opts);
             split_result(out)
         }
         Operation::Chmod => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
             let opts = chmod::ChmodOptions {
                 recursive: envelope.arguments.recurse,
             };
-            let out = chmod::chmod_one_annotated(conn, envelope.target.clone(), &opts);
+            let out = chmod::chmod_one_annotated(conn, target, &opts);
             split_result(out)
         }
-        Operation::Metamod => match metamod_input_from_envelope(envelope) {
-            Ok(input) => {
-                let out = metamod::metamod_one_annotated(conn, input);
-                if let Some(err) = out.error {
-                    (None, Some(err))
-                } else {
-                    // Echo the original envelope target on
-                    // success — metamod has no per-op output to
-                    // surface beyond "applied".
-                    (Some(OperationResult::Single(envelope.target.clone())), None)
+        Operation::Metamod => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
+            match metamod_input_from_envelope(&target, &envelope.arguments) {
+                Ok(input) => {
+                    let out = metamod::metamod_one_annotated(conn, input);
+                    if let Some(err) = out.error {
+                        (None, Some(err))
+                    } else {
+                        // Echo the original envelope target on
+                        // success — metamod has no per-op output
+                        // to surface beyond "applied".
+                        (Some(OperationResult::Single(target)), None)
+                    }
                 }
+                Err(err) => (None, Some(err)),
             }
-            Err(err) => (None, Some(err)),
-        },
-        Operation::Metaquery => (
-            None,
-            Some(BatonError {
-                code: -1,
-                message: "metaquery via baton-do not yet implemented (lands in 7b commit 3 \
-                          alongside the per-operation target-shape fix)"
-                    .to_string(),
-            }),
-        ),
+        }
+        Operation::Metaquery => {
+            let input = match envelope.target.as_metaquery_input() {
+                Some(q) => q.clone(),
+                None => {
+                    // Defensive: can't happen with the custom
+                    // BatonDoEnvelope::Deserialize, which guarantees
+                    // metaquery operations get the Query variant.
+                    // Surface an internal error if it ever does.
+                    return (
+                        None,
+                        Some(BatonError {
+                            code: -1,
+                            message: "internal: metaquery envelope has non-Query target shape"
+                                .to_string(),
+                        }),
+                    );
+                }
+            };
+            let flags = metaquery_flags_from_arguments(&envelope.arguments);
+            match metaquery::metaquery(conn, &input, &flags) {
+                Ok(targets) => {
+                    let deco_opts =
+                        decoration_options_from_arguments(&envelope.arguments);
+                    let decorated: Vec<Target> = targets
+                        .into_iter()
+                        .map(|t| metaquery::decorate_result(conn, t, &deco_opts))
+                        .collect();
+                    (Some(OperationResult::Multiple(decorated)), None)
+                }
+                Err(err) => (None, Some(err)),
+            }
+        }
         Operation::Checksum => {
-            let out = checksum::checksum_one_annotated(conn, envelope.target.clone());
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
+            let out = checksum::checksum_one_annotated(conn, target);
             split_result(out)
         }
-        Operation::Move => match envelope.arguments.path.as_deref() {
-            Some(dest) => {
-                let out = mv::mv_one_annotated(conn, envelope.target.clone(), dest);
-                split_result(out)
+        Operation::Move => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
+            match envelope.arguments.path.as_deref() {
+                Some(dest) => {
+                    let out = mv::mv_one_annotated(conn, target, dest);
+                    split_result(out)
+                }
+                None => (
+                    None,
+                    Some(BatonError {
+                        code: -1,
+                        message: "move via baton-do requires arguments.path (destination)"
+                            .to_string(),
+                    }),
+                ),
             }
-            None => (
-                None,
-                Some(BatonError {
-                    code: -1,
-                    message: "move via baton-do requires arguments.path (destination)"
-                        .to_string(),
-                }),
-            ),
-        },
+        }
         Operation::Remove => {
-            let out = rm::rm_one_annotated(conn, envelope.target.clone());
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
+            let out = rm::rm_one_annotated(conn, target);
             split_result(out)
         }
         Operation::Mkdir => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
             let opts = mkdir::MkdirOptions {
                 recurse: envelope.arguments.recurse,
             };
-            let out = mkdir::mkdir_one_annotated(conn, envelope.target.clone(), &opts);
+            let out = mkdir::mkdir_one_annotated(conn, target, &opts);
             split_result(out)
         }
         Operation::Rmdir => {
+            let target = match expect_standard(&envelope.target) {
+                Ok(t) => t,
+                Err(err) => return (None, Some(err)),
+            };
             let opts = rmdir::RmdirOptions {
                 recurse: envelope.arguments.recurse,
                 force: envelope.arguments.force,
             };
-            let out = rmdir::rmdir_one_annotated(conn, envelope.target.clone(), &opts);
+            let out = rmdir::rmdir_one_annotated(conn, target, &opts);
             split_result(out)
         }
     }
+}
+
+/// Extract a [`Target`] from the envelope's target field for any
+/// non-metaquery operation. The custom Deserialize on
+/// [`BatonDoEnvelope`] guarantees non-metaquery operations get
+/// the `Standard` variant — this function returns an internal
+/// error if that invariant is somehow violated (defensive
+/// against future code changes).
+fn expect_standard(target: &EnvelopeTarget) -> Result<Target, BatonError> {
+    target
+        .as_target()
+        .cloned()
+        .ok_or_else(|| BatonError {
+            code: -1,
+            message: "internal: non-metaquery envelope has Query target shape".to_string(),
+        })
 }
 
 /// Map baton-do envelope arguments onto [`list::ListOptions`].
@@ -165,6 +239,42 @@ fn list_options_from_arguments(args: &Arguments) -> list::ListOptions {
         replicate: args.replicate,
         timestamp: args.timestamp,
         contents: args.contents,
+    }
+}
+
+/// Map baton-do envelope arguments onto
+/// [`metaquery::MetaqueryFlags`]. `--object` and `--collection`
+/// pick the include set; both unset (or both set) means "include
+/// both" — matches upstream baton-do's behaviour at
+/// `baton/src/operations.c:335-341` and the `baton-metaquery`
+/// binary's `metaquery_flags` helper.
+fn metaquery_flags_from_arguments(args: &Arguments) -> metaquery::MetaqueryFlags {
+    if args.object && !args.collection {
+        metaquery::MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        }
+    } else if args.collection && !args.object {
+        metaquery::MetaqueryFlags {
+            include_data_objects: false,
+            include_collections: true,
+        }
+    } else {
+        metaquery::MetaqueryFlags::default()
+    }
+}
+
+/// Map baton-do envelope arguments onto
+/// [`metaquery::DecorationOptions`] for per-result decoration on
+/// the metaquery output path.
+fn decoration_options_from_arguments(args: &Arguments) -> metaquery::DecorationOptions {
+    metaquery::DecorationOptions {
+        size: args.size,
+        checksum: args.checksum,
+        avu: args.avu,
+        acl: args.acl,
+        replicate: args.replicate,
+        timestamp: args.timestamp,
     }
 }
 
@@ -186,7 +296,8 @@ fn split_result(mut target: Target) -> (Option<OperationResult>, Option<BatonErr
     }
 }
 
-/// Convert a baton-do envelope into a [`MetamodInput`].
+/// Convert a baton-do envelope's target + arguments into a
+/// [`MetamodInput`].
 ///
 /// Validates `arguments.operation` is one of the accepted strings.
 /// Upstream baton-do uses `"rem"` (`baton/src/operations.c:281-291`);
@@ -194,17 +305,14 @@ fn split_result(mut target: Target) -> (Option<OperationResult>, Option<BatonErr
 /// honouring both keeps wire-compat with both the upstream
 /// multiplexer and the dedicated `baton-metamod` binary.
 fn metamod_input_from_envelope(
-    envelope: &BatonDoEnvelope,
+    target: &Target,
+    arguments: &Arguments,
 ) -> Result<MetamodInput, BatonError> {
-    let op_str = envelope
-        .arguments
-        .operation
-        .as_deref()
-        .ok_or_else(|| BatonError {
-            code: -1,
-            message: "metamod: arguments.operation is required (\"add\" or \"rem\")"
-                .to_string(),
-        })?;
+    let op_str = arguments.operation.as_deref().ok_or_else(|| BatonError {
+        code: -1,
+        message: "metamod: arguments.operation is required (\"add\" or \"rem\")"
+            .to_string(),
+    })?;
     let operation = match op_str {
         "add" => MetamodOperation::Add,
         "rem" | "rm" => MetamodOperation::Rm,
@@ -218,7 +326,7 @@ fn metamod_input_from_envelope(
         }
     };
 
-    let (collection, data_object, avus) = match &envelope.target {
+    let (collection, data_object, avus) = match target {
         Target::DataObject(d) => (
             d.collection.clone(),
             Some(d.data_object.clone()),
@@ -276,14 +384,6 @@ mod tests {
         })
     }
 
-    fn sample_envelope(operation: Operation, target: Target, arguments: Arguments) -> BatonDoEnvelope {
-        BatonDoEnvelope {
-            operation,
-            target,
-            arguments,
-        }
-    }
-
     // --- list_options_from_arguments -----------------------------------------
 
     #[test]
@@ -318,12 +418,51 @@ mod tests {
         assert!(opts.contents);
     }
 
+    // --- metaquery_flags_from_arguments --------------------------------------
+
+    #[test]
+    fn metaquery_flags_neither_set_includes_both() {
+        let flags = metaquery_flags_from_arguments(&empty_arguments());
+        assert!(flags.include_data_objects);
+        assert!(flags.include_collections);
+    }
+
+    #[test]
+    fn metaquery_flags_object_only() {
+        let mut args = empty_arguments();
+        args.object = true;
+        let flags = metaquery_flags_from_arguments(&args);
+        assert!(flags.include_data_objects);
+        assert!(!flags.include_collections);
+    }
+
+    #[test]
+    fn metaquery_flags_collection_only() {
+        let mut args = empty_arguments();
+        args.collection = true;
+        let flags = metaquery_flags_from_arguments(&args);
+        assert!(!flags.include_data_objects);
+        assert!(flags.include_collections);
+    }
+
+    #[test]
+    fn metaquery_flags_both_set_includes_both() {
+        // Both flags set at once — same fall-through as neither
+        // set. Matches upstream's "default to include both"
+        // behaviour and the equivalent helper in
+        // baton-metaquery's binary.
+        let mut args = empty_arguments();
+        args.object = true;
+        args.collection = true;
+        let flags = metaquery_flags_from_arguments(&args);
+        assert!(flags.include_data_objects);
+        assert!(flags.include_collections);
+    }
+
     // --- split_result --------------------------------------------------------
 
     #[test]
     fn split_result_success_path_returns_single_with_target() {
-        // No error annotation on the target → wrapped as
-        // OperationResult::Single, no envelope-level error.
         let target = sample_data_object_target();
         let (result, error) = split_result(target);
         assert!(error.is_none());
@@ -335,10 +474,6 @@ mod tests {
 
     #[test]
     fn split_result_pulls_error_annotation_to_envelope_level() {
-        // Error annotation on the target → no result, error
-        // propagated. Pins that the wire shape doesn't
-        // double-emit the error (target.error and
-        // envelope.error in the same line).
         let mut target = sample_data_object_target();
         if let Target::DataObject(ref mut d) = target {
             d.error = Some(BatonError {
@@ -352,40 +487,12 @@ mod tests {
         assert_eq!(err.code, -310000);
     }
 
-    #[test]
-    fn split_result_strips_error_from_target_when_present() {
-        // Defensive: the returned-but-discarded target shouldn't
-        // still carry the error annotation (it's been moved to
-        // envelope-level). split_result uses .take() to pull
-        // the error out, leaving target.error = None on the
-        // way out — even though we discard the target on the
-        // error path here, the take() pattern is what protects
-        // future code paths that might surface the target after
-        // an annotated error.
-        let mut target = sample_data_object_target();
-        if let Target::DataObject(ref mut d) = target {
-            d.error = Some(BatonError {
-                code: -1,
-                message: "x".to_string(),
-            });
-        }
-        // Move into split_result, get a Some(error) back; the
-        // target is consumed but the take() inside guarantees
-        // the error wasn't cloned-and-left.
-        let (_, error) = split_result(target);
-        assert!(error.is_some());
-    }
-
     // --- metamod_input_from_envelope ----------------------------------------
 
     #[test]
     fn metamod_input_requires_arguments_operation() {
-        let envelope = sample_envelope(
-            Operation::Metamod,
-            sample_data_object_target(),
-            empty_arguments(),
-        );
-        let result = metamod_input_from_envelope(&envelope);
+        let target = sample_data_object_target();
+        let result = metamod_input_from_envelope(&target, &empty_arguments());
         let err = result.expect_err("missing arguments.operation should error");
         assert!(
             err.message.contains("arguments.operation is required"),
@@ -398,32 +505,26 @@ mod tests {
     fn metamod_input_accepts_add() {
         let mut args = empty_arguments();
         args.operation = Some("add".to_string());
-        let envelope = sample_envelope(Operation::Metamod, sample_data_object_target(), args);
-        let input = metamod_input_from_envelope(&envelope).expect("add should parse");
+        let input =
+            metamod_input_from_envelope(&sample_data_object_target(), &args).expect("add");
         assert_eq!(input.operation, MetamodOperation::Add);
     }
 
     #[test]
     fn metamod_input_accepts_rem_upstream_form() {
-        // Upstream baton-do uses "rem"
-        // (baton/src/operations.c:281-291) — must accept it for
-        // partisan compat.
         let mut args = empty_arguments();
         args.operation = Some("rem".to_string());
-        let envelope = sample_envelope(Operation::Metamod, sample_data_object_target(), args);
-        let input = metamod_input_from_envelope(&envelope).expect("rem should parse");
+        let input =
+            metamod_input_from_envelope(&sample_data_object_target(), &args).expect("rem");
         assert_eq!(input.operation, MetamodOperation::Rm);
     }
 
     #[test]
     fn metamod_input_accepts_rm_legacy_form() {
-        // baton-rs's existing MetamodOperation enum serialises
-        // as "rm"; honouring both forms keeps wire-compat with
-        // the dedicated baton-metamod binary too.
         let mut args = empty_arguments();
         args.operation = Some("rm".to_string());
-        let envelope = sample_envelope(Operation::Metamod, sample_data_object_target(), args);
-        let input = metamod_input_from_envelope(&envelope).expect("rm should parse");
+        let input =
+            metamod_input_from_envelope(&sample_data_object_target(), &args).expect("rm");
         assert_eq!(input.operation, MetamodOperation::Rm);
     }
 
@@ -431,8 +532,7 @@ mod tests {
     fn metamod_input_rejects_unknown_operation() {
         let mut args = empty_arguments();
         args.operation = Some("delete".to_string());
-        let envelope = sample_envelope(Operation::Metamod, sample_data_object_target(), args);
-        let result = metamod_input_from_envelope(&envelope);
+        let result = metamod_input_from_envelope(&sample_data_object_target(), &args);
         let err = result.expect_err("unknown op should error");
         assert!(
             err.message.contains("\"delete\""),
@@ -457,8 +557,7 @@ mod tests {
         });
         let mut args = empty_arguments();
         args.operation = Some("add".to_string());
-        let envelope = sample_envelope(Operation::Metamod, target, args);
-        let input = metamod_input_from_envelope(&envelope).expect("parse");
+        let input = metamod_input_from_envelope(&target, &args).expect("parse");
         assert_eq!(input.avus, avus);
         assert_eq!(input.data_object.as_deref(), Some("foo.txt"));
     }
@@ -479,45 +578,8 @@ mod tests {
         });
         let mut args = empty_arguments();
         args.operation = Some("add".to_string());
-        let envelope = sample_envelope(Operation::Metamod, target, args);
-        let input = metamod_input_from_envelope(&envelope).expect("parse");
+        let input = metamod_input_from_envelope(&target, &args).expect("parse");
         assert_eq!(input.avus, avus);
         assert_eq!(input.data_object, None);
-    }
-
-    // --- dispatch_one (operation-level smoke tests, no iRODS) -----------------
-
-    #[test]
-    fn dispatch_metaquery_returns_not_implemented_error() {
-        // Pin the deferred-metaquery placeholder until commit 3
-        // of 7b lands the real fix. CI on this branch should NOT
-        // pass with metaquery returning Ok.
-        //
-        // We can construct this test without an iRODS connection
-        // because the metaquery arm errors out before any
-        // network call — but dispatch_one's signature wants a
-        // &mut RodsConnection. We side-step by validating via
-        // the envelope construction shape, not via dispatch
-        // directly (which would need a real conn).
-        //
-        // Confirm the message shape via dispatch_inner-like
-        // logic by checking the placeholder error string is
-        // what the dispatcher returns. Direct call test will
-        // come with the integration tests.
-        //
-        // For this commit, the unit-test confidence is in:
-        //   - the helper functions above (operation parsing,
-        //     options mapping, error extraction)
-        //   - integration tests in tests/baton_do_dispatch.rs
-        //     prove end-to-end routing on a live connection.
-        //
-        // This test exists as a placeholder to remind readers
-        // that the deferred case is intentional. No assertion
-        // beyond "the codepath compiles".
-        let _ = sample_envelope(
-            Operation::Metaquery,
-            sample_data_object_target(),
-            empty_arguments(),
-        );
     }
 }

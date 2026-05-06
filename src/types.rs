@@ -8,7 +8,9 @@
 //! All types round-trip against the baton 6.0.0 JSON schema
 //! (<https://wtsi-npg.github.io/baton/>).
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 
 use crate::error::BatonError;
 
@@ -563,6 +565,44 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// The target field of a [`BatonDoEnvelope`]. Most operations
+/// carry a [`Target`]; `metaquery` carries a richer
+/// [`MetaqueryInput`] (with `AvuQuery` / `TimestampQuery` /
+/// `AccessQuery` operator fields and a top-level `zone`).
+///
+/// On deserialise, [`BatonDoEnvelope`]'s custom `Deserialize`
+/// reads the operation field first and picks the right variant;
+/// callers don't construct `EnvelopeTarget` by hand. On
+/// serialise, the variants are untagged — the wire shape is
+/// just the inner type's JSON, no extra wrapper key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum EnvelopeTarget {
+    Standard(Target),
+    Query(MetaqueryInput),
+}
+
+impl EnvelopeTarget {
+    /// Borrow as `Target`. Returns `None` for the `Query`
+    /// variant — callers handling the metaquery operation use
+    /// [`Self::as_metaquery_input`] instead.
+    pub fn as_target(&self) -> Option<&Target> {
+        match self {
+            EnvelopeTarget::Standard(t) => Some(t),
+            EnvelopeTarget::Query(_) => None,
+        }
+    }
+
+    /// Borrow as `MetaqueryInput`. Returns `None` for the
+    /// `Standard` variant.
+    pub fn as_metaquery_input(&self) -> Option<&MetaqueryInput> {
+        match self {
+            EnvelopeTarget::Standard(_) => None,
+            EnvelopeTarget::Query(q) => Some(q),
+        }
+    }
+}
+
 /// Input envelope to `baton-do`. One per NDJSON input line.
 ///
 /// Wire shape: `{"operation": "<op>", "target": {...}, "arguments": {...}?}`.
@@ -572,15 +612,151 @@ fn is_false(b: &bool) -> bool {
 /// which requires `arguments.operation`. The dispatcher enforces
 /// that requirement at the call site rather than in serde so the
 /// error has a clear per-operation message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `target` is an [`EnvelopeTarget`] enum because metaquery's
+/// wire-format target shape differs from the rest (it carries
+/// query-time operators and a `zone` scope that the standard
+/// [`Target`] type doesn't model). The custom `Deserialize`
+/// impl reads `operation` first and picks the right variant;
+/// for serialisation the variants are untagged so the wire shape
+/// stays exactly upstream's.
+///
+/// Use [`Self::new_standard`] / [`Self::new_metaquery`] to
+/// construct envelopes in code without having to spell out the
+/// inner enum variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BatonDoEnvelope {
-    #[serde(alias = "op")]
     pub operation: Operation,
 
-    pub target: Target,
+    pub target: EnvelopeTarget,
 
-    #[serde(default, alias = "args", skip_serializing_if = "Arguments::is_empty")]
+    #[serde(default, skip_serializing_if = "Arguments::is_empty")]
     pub arguments: Arguments,
+}
+
+impl BatonDoEnvelope {
+    /// Construct an envelope with a standard [`Target`]. Used by
+    /// every operation except `metaquery`.
+    pub fn new_standard(
+        operation: Operation,
+        target: Target,
+        arguments: Arguments,
+    ) -> Self {
+        Self {
+            operation,
+            target: EnvelopeTarget::Standard(target),
+            arguments,
+        }
+    }
+
+    /// Construct a metaquery envelope. The operation is
+    /// implicitly [`Operation::Metaquery`] — the target shape
+    /// would be ambiguous otherwise.
+    pub fn new_metaquery(input: MetaqueryInput, arguments: Arguments) -> Self {
+        Self {
+            operation: Operation::Metaquery,
+            target: EnvelopeTarget::Query(input),
+            arguments,
+        }
+    }
+}
+
+// Custom Deserialize on BatonDoEnvelope: serde can't peek at one
+// field's value to drive another field's deserialisation through
+// derive macros alone, and we need exactly that — `target`'s
+// shape depends on `operation`. Hand-rolled visitor reads the
+// JSON map, identifies the operation (accepting the `op` alias),
+// then deserialises `target` into the right `EnvelopeTarget`
+// variant. `arguments` reads the `args` alias too.
+impl<'de> Deserialize<'de> for BatonDoEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EnvelopeVisitor;
+
+        impl<'de> Visitor<'de> for EnvelopeVisitor {
+            type Value = BatonDoEnvelope;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a baton-do envelope object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                // Buffer fields by raw JSON value first; resolve
+                // target shape once we know the operation. serde
+                // doesn't guarantee key order, so we have to
+                // accept any ordering of operation / target /
+                // arguments and reconstruct at the end.
+                let mut operation: Option<Operation> = None;
+                let mut target_value: Option<serde_json::Value> = None;
+                let mut arguments_value: Option<serde_json::Value> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "operation" | "op" => {
+                            if operation.is_some() {
+                                return Err(de::Error::duplicate_field("operation"));
+                            }
+                            operation = Some(map.next_value()?);
+                        }
+                        "target" => {
+                            if target_value.is_some() {
+                                return Err(de::Error::duplicate_field("target"));
+                            }
+                            target_value = Some(map.next_value()?);
+                        }
+                        "arguments" | "args" => {
+                            if arguments_value.is_some() {
+                                return Err(de::Error::duplicate_field("arguments"));
+                            }
+                            arguments_value = Some(map.next_value()?);
+                        }
+                        _ => {
+                            // Skip unknown keys — matches
+                            // upstream's tolerance for
+                            // forward-compat fields.
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let operation = operation
+                    .ok_or_else(|| de::Error::missing_field("operation"))?;
+                let target_value = target_value
+                    .ok_or_else(|| de::Error::missing_field("target"))?;
+
+                let target = match operation {
+                    Operation::Metaquery => {
+                        let input: MetaqueryInput =
+                            serde_json::from_value(target_value).map_err(de::Error::custom)?;
+                        EnvelopeTarget::Query(input)
+                    }
+                    _ => {
+                        let t: Target =
+                            serde_json::from_value(target_value).map_err(de::Error::custom)?;
+                        EnvelopeTarget::Standard(t)
+                    }
+                };
+
+                let arguments = match arguments_value {
+                    Some(v) => serde_json::from_value(v).map_err(de::Error::custom)?,
+                    None => Arguments::default(),
+                };
+
+                Ok(BatonDoEnvelope {
+                    operation,
+                    target,
+                    arguments,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EnvelopeVisitor)
+    }
 }
 
 /// Result payload baton-do attaches to the output envelope on
@@ -595,26 +771,160 @@ pub enum OperationResult {
     Multiple(Vec<Target>),
 }
 
-/// Output envelope from `baton-do`. The input envelope is echoed
-/// (`#[serde(flatten)]`) plus exactly one of `result` or `error`
-/// is populated:
+/// Output envelope from `baton-do`. Same wire shape as the input
+/// envelope plus exactly one of `result` or `error`:
 ///
 /// - `result` carries the per-operation output on success.
 /// - `error` carries an in-band annotation on per-input failure.
 ///
 /// Both fields are skip-serialised when `None`; the on-the-wire
-/// invariant is "exactly one is present". The dispatcher enforces
-/// this by construction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// invariant is "exactly one is present" and the dispatcher
+/// enforces this by construction.
+///
+/// Mirrors the input shape rather than wrapping it via
+/// `#[serde(flatten)]` because [`BatonDoEnvelope`]'s custom
+/// `Deserialize` doesn't compose with flatten — serde's flatten
+/// machinery requires the inner type's deserialise to operate on
+/// a content map rather than a freshly-driven map. Inlining the
+/// fields here keeps the wire-format identical to upstream
+/// (operation / target / arguments at the top level alongside
+/// result / error) and keeps the deserialiser explicit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BatonDoOutput {
-    #[serde(flatten)]
-    pub envelope: BatonDoEnvelope,
+    pub operation: Operation,
+
+    pub target: EnvelopeTarget,
+
+    #[serde(default, skip_serializing_if = "Arguments::is_empty")]
+    pub arguments: Arguments,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub result: Option<OperationResult>,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error: Option<BatonError>,
+}
+
+impl BatonDoOutput {
+    /// Build an output from an input envelope plus one of the
+    /// outcome fields. The dispatcher uses this to compose the
+    /// output line — exactly one of `result` / `error` should be
+    /// `Some`, the other `None`.
+    pub fn new(
+        envelope: BatonDoEnvelope,
+        result: Option<OperationResult>,
+        error: Option<BatonError>,
+    ) -> Self {
+        Self {
+            operation: envelope.operation,
+            target: envelope.target,
+            arguments: envelope.arguments,
+            result,
+            error,
+        }
+    }
+}
+
+// Custom Deserialize on BatonDoOutput, parallel to
+// BatonDoEnvelope's. Same operation-driven target dispatch, plus
+// the result / error fields that only appear on output.
+impl<'de> Deserialize<'de> for BatonDoOutput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OutputVisitor;
+
+        impl<'de> Visitor<'de> for OutputVisitor {
+            type Value = BatonDoOutput;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a baton-do output object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut operation: Option<Operation> = None;
+                let mut target_value: Option<serde_json::Value> = None;
+                let mut arguments_value: Option<serde_json::Value> = None;
+                let mut result: Option<OperationResult> = None;
+                let mut error: Option<BatonError> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "operation" | "op" => {
+                            if operation.is_some() {
+                                return Err(de::Error::duplicate_field("operation"));
+                            }
+                            operation = Some(map.next_value()?);
+                        }
+                        "target" => {
+                            if target_value.is_some() {
+                                return Err(de::Error::duplicate_field("target"));
+                            }
+                            target_value = Some(map.next_value()?);
+                        }
+                        "arguments" | "args" => {
+                            if arguments_value.is_some() {
+                                return Err(de::Error::duplicate_field("arguments"));
+                            }
+                            arguments_value = Some(map.next_value()?);
+                        }
+                        "result" => {
+                            if result.is_some() {
+                                return Err(de::Error::duplicate_field("result"));
+                            }
+                            result = Some(map.next_value()?);
+                        }
+                        "error" => {
+                            if error.is_some() {
+                                return Err(de::Error::duplicate_field("error"));
+                            }
+                            error = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let operation = operation
+                    .ok_or_else(|| de::Error::missing_field("operation"))?;
+                let target_value = target_value
+                    .ok_or_else(|| de::Error::missing_field("target"))?;
+
+                let target = match operation {
+                    Operation::Metaquery => {
+                        let input: MetaqueryInput =
+                            serde_json::from_value(target_value).map_err(de::Error::custom)?;
+                        EnvelopeTarget::Query(input)
+                    }
+                    _ => {
+                        let t: Target =
+                            serde_json::from_value(target_value).map_err(de::Error::custom)?;
+                        EnvelopeTarget::Standard(t)
+                    }
+                };
+
+                let arguments = match arguments_value {
+                    Some(v) => serde_json::from_value(v).map_err(de::Error::custom)?,
+                    None => Arguments::default(),
+                };
+
+                Ok(BatonDoOutput {
+                    operation,
+                    target,
+                    arguments,
+                    result,
+                    error,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(OutputVisitor)
+    }
 }
 
 #[cfg(test)]
@@ -1277,12 +1587,15 @@ mod tests {
 
     #[test]
     fn baton_do_output_with_result_round_trips() {
-        // Success output: input echoed plus a `result` field. The
-        // envelope fields are flattened so the wire shape matches
-        // upstream's `add_result` mutation of the input item.
+        // Success output: input echoed plus a `result` field.
+        // BatonDoOutput inlines the envelope fields directly
+        // rather than flattening (custom Deserialize doesn't
+        // compose with serde flatten); wire shape stays
+        // identical to upstream's add_result mutation of the
+        // input item.
         let json = r#"{"operation":"list","target":{"collection":"/x","data_object":"y"},"result":{"single":{"collection":"/x","data_object":"y","size":1024}}}"#;
         let out: BatonDoOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(out.envelope.operation, Operation::List);
+        assert_eq!(out.operation, Operation::List);
         assert!(out.result.is_some());
         assert!(out.error.is_none());
         assert_eq!(serde_json::to_string(&out).unwrap(), json);
@@ -1295,9 +1608,77 @@ mod tests {
         // (`baton/src/operations.c:129-136`).
         let json = r#"{"operation":"get","target":{"collection":"/x","data_object":"missing"},"error":{"code":-310000,"message":"USER_FILE_DOES_NOT_EXIST"}}"#;
         let out: BatonDoOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(out.envelope.operation, Operation::Get);
+        assert_eq!(out.operation, Operation::Get);
         assert!(out.result.is_none());
         assert_eq!(out.error.as_ref().map(|e| e.code), Some(-310000));
         assert_eq!(serde_json::to_string(&out).unwrap(), json);
+    }
+
+    #[test]
+    fn baton_do_envelope_metaquery_target_is_metaquery_input() {
+        // The metaquery operation gets a richer target shape:
+        // AvuQuery (with operator) instead of Avu, and a
+        // top-level zone scope. The custom Deserialize on the
+        // envelope reads the operation field first and picks the
+        // right EnvelopeTarget variant.
+        let json = r#"{"operation":"metaquery","target":{"avus":[{"attribute":"sample","value":"12*","operator":"like"}],"zone":"testZone"}}"#;
+        let env: BatonDoEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(env.operation, Operation::Metaquery);
+        let q = env.target.as_metaquery_input().expect("metaquery variant");
+        assert_eq!(q.avus.len(), 1);
+        assert_eq!(q.avus[0].operator, Operator::Like);
+        assert_eq!(q.zone.as_deref(), Some("testZone"));
+        // The raw target shape round-trips because the
+        // EnvelopeTarget enum is untagged on serialise (no
+        // wrapper key around the inner JSON).
+        assert_eq!(serde_json::to_string(&env).unwrap(), json);
+    }
+
+    #[test]
+    fn baton_do_envelope_non_metaquery_target_is_standard_target() {
+        // Non-metaquery operations carry a plain Target. JSON
+        // shapes that overlap (like a bare {"collection": "/x"})
+        // still get routed correctly because the custom
+        // Deserialize switches on operation before parsing
+        // target.
+        let json = r#"{"operation":"chmod","target":{"collection":"/x"}}"#;
+        let env: BatonDoEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(env.operation, Operation::Chmod);
+        match env.target.as_target() {
+            Some(Target::Collection(c)) => assert_eq!(c.collection, "/x"),
+            other => panic!("expected Collection target, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn baton_do_envelope_constructor_helpers_round_trip() {
+        // Code-side construction goes through new_standard /
+        // new_metaquery — callers don't have to spell out the
+        // EnvelopeTarget variant by hand.
+        let target = Target::DataObject(DataObject {
+            collection: "/x".to_string(),
+            data_object: "y".to_string(),
+            size: None,
+            checksum: None,
+            data: None,
+            directory: None,
+            avus: None,
+            access: None,
+            replicates: None,
+            timestamps: None,
+            error: None,
+        });
+        let env = BatonDoEnvelope::new_standard(
+            Operation::List,
+            target,
+            Arguments::default(),
+        );
+        assert!(matches!(env.target, EnvelopeTarget::Standard(_)));
+
+        let mut q = MetaqueryInput::default();
+        q.zone = Some("testZone".to_string());
+        let env_q = BatonDoEnvelope::new_metaquery(q, Arguments::default());
+        assert_eq!(env_q.operation, Operation::Metaquery);
+        assert!(matches!(env_q.target, EnvelopeTarget::Query(_)));
     }
 }
