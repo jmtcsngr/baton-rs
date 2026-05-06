@@ -240,7 +240,7 @@ fn dispatch_move_requires_arguments_path() {
     conn.login_from_auth_file().expect("login_from_auth_file");
 
     let envelope = BatonDoEnvelope::new_standard(
-        Operation::Move,
+        Operation::Mv,
         data_object_target("/testZone/home/irods", "irrelevant"),
         Arguments::default(),
     );

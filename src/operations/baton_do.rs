@@ -159,7 +159,7 @@ fn dispatch_inner(
             let out = checksum::checksum_one_annotated(conn, target);
             split_result(out)
         }
-        Operation::Move => {
+        Operation::Mv => {
             let target = match expect_standard(&envelope.target) {
                 Ok(t) => t,
                 Err(err) => return (None, Some(err)),
@@ -179,7 +179,7 @@ fn dispatch_inner(
                 ),
             }
         }
-        Operation::Remove => {
+        Operation::Rm => {
             let target = match expect_standard(&envelope.target) {
                 Ok(t) => t,
                 Err(err) => return (None, Some(err)),

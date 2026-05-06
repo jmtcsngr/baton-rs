@@ -553,7 +553,7 @@ fn binary_dispatches_rmdir() {
     assert!(!status.success(), "ils {} should fail after rmdir", coll);
 }
 
-// --- Operation::Remove ---------------------------------------------------
+// --- Operation::Rm -------------------------------------------------------
 
 #[test]
 fn binary_dispatches_remove() {
@@ -567,7 +567,7 @@ fn binary_dispatches_remove() {
     let _cleanup = IrodsCleanup(remote.clone());
 
     let env = BatonDoEnvelope::new_standard(
-        Operation::Remove,
+        Operation::Rm,
         data_object_target(TEST_COLL, &name),
         Arguments::default(),
     );
@@ -582,7 +582,7 @@ fn binary_dispatches_remove() {
     assert!(!status.success(), "ils {} should fail after rm", remote);
 }
 
-// --- Operation::Move -----------------------------------------------------
+// --- Operation::Mv -------------------------------------------------------
 
 #[test]
 fn binary_dispatches_move() {
@@ -599,7 +599,7 @@ fn binary_dispatches_move() {
     let mut args = Arguments::default();
     args.path = Some(dest_remote.clone());
     let env = BatonDoEnvelope::new_standard(
-        Operation::Move,
+        Operation::Mv,
         data_object_target(TEST_COLL, &src_name),
         args,
     );
@@ -975,7 +975,7 @@ fn boundary_path_with_spaces_through_checksum_and_rm() {
         args,
     );
     let rm_env = BatonDoEnvelope::new_standard(
-        Operation::Remove,
+        Operation::Rm,
         data_object_target(TEST_COLL, &name),
         Arguments::default(),
     );
