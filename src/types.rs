@@ -477,7 +477,9 @@ pub enum Operation {
 ///   `contents`: output-decoration flags shared with `baton-list` and
 ///   `baton-metaquery`.
 /// - `verify`: `baton-put`'s client-side hashing flag.
-/// - `save` / `raw`: `baton-get` modes.
+/// - `save`: `baton-get` save-to-disk mode.
+/// - `raw`: accepted-but-no-op (upstream's raw-bytes get mode;
+///   baton-rs always returns the inline base64 representation).
 /// - `recurse` / `force`: shared by `chmod` / `mkdir` / `rmdir`.
 /// - `collection` / `object`: `baton-metaquery` scope flags.
 /// - `single_server`: passed through accepted-but-no-op (baton-rs's put

@@ -81,9 +81,11 @@ struct Args {
     debug: bool,
 
     /// iRODS zone name. Accepted for upstream-CLI compatibility but
-    /// currently not threaded through the dispatcher — the per-record
-    /// `zone` field on metaquery input envelopes is the supported way
-    /// to scope a query to a zone.
+    /// currently not threaded through the dispatcher. Multi-zone
+    /// metaquery scoping is not supported in v1 — queries run
+    /// against the local zone only (per-record `zone` on metaquery
+    /// envelopes is also dropped at the operations layer). Tracked
+    /// for a future session.
     #[arg(short = 'z', long)]
     zone: Option<String>,
 
