@@ -453,6 +453,12 @@ pub struct MetaqueryInput {
 /// `baton-do`-only ones added in Session 7a (`checksum` / `move` /
 /// `remove` / `mkdir` / `rmdir`). The wire form is bare lowercase.
 ///
+/// `Mv` and `Rm` carry explicit `#[serde(rename = ...)]` attributes
+/// so the wire form stays `"move"` / `"remove"` while the Rust
+/// variant names follow the abbreviation pattern shared with
+/// `Mkdir` / `Rmdir` (the modules they dispatch into are also
+/// `mv` / `rm`).
+///
 /// Anything else on input → serde fails to deserialise; the binary
 /// surfaces it as a parse error per the upstream-mirroring drop
 /// (deviation tracked in #37).
@@ -466,8 +472,10 @@ pub enum Operation {
     Metamod,
     Metaquery,
     Checksum,
-    Move,
-    Remove,
+    #[serde(rename = "move")]
+    Mv,
+    #[serde(rename = "remove")]
+    Rm,
     Mkdir,
     Rmdir,
 }
@@ -1492,8 +1500,8 @@ mod tests {
             (r#""metamod""#, Operation::Metamod),
             (r#""metaquery""#, Operation::Metaquery),
             (r#""checksum""#, Operation::Checksum),
-            (r#""move""#, Operation::Move),
-            (r#""remove""#, Operation::Remove),
+            (r#""move""#, Operation::Mv),
+            (r#""remove""#, Operation::Rm),
             (r#""mkdir""#, Operation::Mkdir),
             (r#""rmdir""#, Operation::Rmdir),
         ] {
