@@ -515,9 +515,12 @@ fn binary_dispatches_mkdir() {
     assert_eq!(outputs.len(), 1);
     assert!(outputs[0].error.is_none(), "mkdir error: {:?}", outputs[0].error);
 
-    // Confirm via ils -d that the collection now exists.
-    let status = Command::new("ils").arg("-d").arg(&new_coll).status().expect("spawn ils");
-    assert!(status.success(), "ils -d {} should succeed after mkdir", new_coll);
+    // Confirm via `ils` that the collection now exists. We avoid
+    // `ils -d` here because iRODS 4.2.7 doesn't accept that option;
+    // plain `ils <coll>` works on both 4.2.7 and 4.3.x — exits 0 if
+    // the path exists, non-zero if not.
+    let status = Command::new("ils").arg(&new_coll).status().expect("spawn ils");
+    assert!(status.success(), "ils {} should succeed after mkdir", new_coll);
 }
 
 // --- Operation::Rmdir ----------------------------------------------------
@@ -544,9 +547,10 @@ fn binary_dispatches_rmdir() {
     assert_eq!(outputs.len(), 1);
     assert!(outputs[0].error.is_none(), "rmdir error: {:?}", outputs[0].error);
 
-    // Confirm gone.
-    let status = Command::new("ils").arg("-d").arg(&coll).status().expect("spawn ils");
-    assert!(!status.success(), "ils -d {} should fail after rmdir", coll);
+    // Confirm gone. Plain `ils` works on both 4.2.7 and 4.3.x; `-d`
+    // would be 4.3.x-only.
+    let status = Command::new("ils").arg(&coll).status().expect("spawn ils");
+    assert!(!status.success(), "ils {} should fail after rmdir", coll);
 }
 
 // --- Operation::Remove ---------------------------------------------------
