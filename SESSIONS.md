@@ -404,21 +404,79 @@ Implementation-detail choices:
 
 ### Session 7 — baton-do multiplexer
 
-**Status:** `<not started>`
+**Status:** completed on 2026-05-06
 
-**Goal:** JSON envelope dispatcher covering list, get, put, chmod, metamod, metaquery, checksum, move, remove, mkdir, rmdir. `--no-error` mode.
+**Goal:** JSON envelope dispatcher covering list, get, put, chmod, metamod, metaquery, checksum, move, remove, mkdir, rmdir (11 operations). `--no-error` mode. Single working branch `feat/session-7-baton-do`. Split internally into 7a (new shim primitives + 5 new operations) and 7b (envelope types + dispatcher + binary + tests), with a 7c pre-PR audit pass.
 
-**Completed:**
-- `<fill in>`
+**Completed (18 commits):**
+
+7a — five new operations needed by baton-do:
+
+- **Path-management shim primitives** (`shim/ffi_shim.{h,c}`, mirrored in `src/ffi.rs`) — `shim_data_obj_chksum` (server-side digest, wraps `rcDataObjChksum`), `shim_coll_create` / `shim_coll_remove` (collection lifecycle, wrap `rcCollCreate` / `rcRmColl`), `shim_data_obj_unlink` (data-object delete, wraps `rcDataObjUnlink`), `shim_data_obj_rename` / `shim_coll_rename` (rename / move, wrap `rcDataObjRename` / `rcCollRename`). Force / recursive / verify flags exposed where upstream's struct bitfields demand them.
+- **`RodsConnection` typed wrappers** (`src/connection.rs`) for each new shim primitive. Same shape as the Session 6 `mod_access_control` wrapper: build CStrings client-side, dispatch through the shim, error-wrap any non-zero return.
+- **`operations::checksum`** — `ChecksumOptions { force: bool, verify: bool, all: bool }`, `checksum_one`, `checksum_one_annotated`. `force` forces re-compute; `verify` cross-checks against the catalog-recorded digest after compute; `all` distributes per-replica when the object has multiple. Wire-compat with upstream's `--checksum` / `--verify` semantics.
+- **`operations::mkdir`** — `MkdirOptions { recursive: bool }`, `mkdir_one`, `mkdir_one_annotated`. `recursive` creates intermediate collections (`recursiveOpr` flag on `rcCollCreate`).
+- **`operations::rmdir`** — `RmdirOptions { recursive: bool, force: bool }`, `rmdir_one`, `rmdir_one_annotated`. `recursive` walks server-side; `force` skips the trash. Empty / absent collection annotates `error` rather than panicking.
+- **`operations::rm`** — `RmOptions { force: bool }`, `rm_one`, `rm_one_annotated`. `force` skips the trash for data-object delete (matches `iRODS`'s `forceFlag`). Collections fall through to `rmdir` semantics rather than failing.
+- **`operations::mv`** — `MvOptions {}` (no flags exposed), `mv_one`, `mv_one_annotated`. `arguments.path` carries the destination; missing it surfaces a clear `arguments.path required` error before any iRODS call. Same path is used by both data objects and collections — `rcDataObjRename` / `rcCollRename` differentiate server-side.
+- **Tests** — Per-operation integration test suites (`tests/checksum.rs`, `tests/mkdir.rs`, `tests/rmdir.rs`, `tests/rm.rs`, `tests/mv.rs`, ~10 tests each) covering happy path, recursive / force / verify, missing-path annotation, recovery-after-error on the same connection, and echo-equality (where applicable). 7a closed with a post-7a audit cleanup pass (commits `31cb65e`, `76c9ac3`) bumping doc dates, filling missing recovery-after-error tests, and pinning echo equality.
+
+7b — envelope, dispatcher, binary, integration tests:
+
+- **`BatonDoEnvelope` / `BatonDoOutput` / `Operation` / `Arguments` / `OperationResult` / `EnvelopeTarget`** (`src/types.rs`) — full JSON wire shape with custom `Deserialize` driving the operation-discriminated target split. `EnvelopeTarget::Standard(Target)` for non-metaquery operations; `EnvelopeTarget::Query(MetaqueryInput)` for metaquery (carries `AvuQuery` / `TimestampQuery` / `AccessQuery` operator fields and the top-level `zone` scope). `Arguments` accepts both long and short forms (`object`/`o`, `collection`/`coll`, etc.); short-form aliases match upstream baton-do exactly. `BatonDoOutput` inlines envelope fields rather than `#[serde(flatten)]` — flatten doesn't compose with custom `Deserialize`. Constructor helpers `new_standard` / `new_metaquery` keep test code clean.
+- **`operations::baton_do::dispatch_one`** — top-level dispatcher. `match` on `envelope.operation` (11 arms, one per operation; the `Operation` enum is closed and unknown discriminators are rejected by serde at envelope-deserialise time, surfacing as parse-error lines via the binary's NDJSON loop). Each non-metaquery arm pulls a `Target` via `expect_standard`; metaquery arm pulls a `MetaqueryInput` via `as_metaquery_input`. Per-op `*_one_annotated` calls; per-op error annotations are pulled from `Target.error` / `*Input.error` to envelope-level `BatonDoOutput.error` per upstream's `add_error_value` behaviour (`baton/src/operations.c:129-136`). Helpers `list_options_from_arguments` / `metaquery_flags_from_arguments` / `decoration_options_from_arguments` map `Arguments` onto each operation's typed options.
+- **`operations::metaquery::decorate_result` + `DecorationOptions`** (extracted from `baton-metaquery` binary into the operations module) — shared between `baton-metaquery` and `baton-do`'s metaquery path so per-result decoration semantics live in one place.
+- **`baton-do` binary** (`src/bin/baton-do.rs`) — clap-driven NDJSON loop. Args: `--file` / stdin input, `--connect-time` / `-c`, `--no-error`, `--unbuffered`, `--verbose` / `--silent` / `--debug` (mirrors upstream's `-v` / `--silent` / `--debug`), `--zone` / `-z` (accepted-but-ignored, warns; per-record metaquery `zone` is the supported way), `--single-server` (accepted-but-no-op; baton-rs already reuses connections). Per-input failures annotate `error` and the stream continues. Parse failures emit a stand-alone `{"error": {...}}` line and the stream continues — documented divergence from upstream's parse-error wire shape, tracked as #37. Connection-level failures are fail-fast. `ReconnectingSession` watchdog wired in for `--connect-time`. Exit code: 1 if any per-input error occurred (suppressed by `--no-error`), 0 otherwise.
+- **`tests/baton_do_dispatch.rs`** — live-connection dispatch routing tests (4 tests) covering list-with-size routing, metaquery-with-operator → `OperationResult::Multiple`, metaquery + size decoration through the dispatcher, and `mv` arguments-validation.
+- **`tests/baton_do_binary.rs`** — full binary-level integration coverage (16 tests) spawning the compiled `baton-do` via `env!("CARGO_BIN_EXE_baton-do")`. One test per operation (list / get / put / chmod / metamod / metaquery / checksum / mkdir / rmdir / remove / move) exercising the full clap → NDJSON → deserialiser → dispatcher → operations layer pipeline. Plus five binary-only tests: `--no-error` exit-code suppression, parse-failure stand-alone error line, unknown-operation-discriminator stand-alone error line, `--file` reading from disk, and multi-record stream dispatch in one invocation.
+- **iRODS 4.2.7 compat fix** (`b13514a`) — `binary_dispatches_mkdir` / `_rmdir` post-conditions used `ils -d` to check path existence, but 4.2.7's `ils` doesn't accept `-d` (4.3.x-only). Replaced with plain `ils <path>` which exits 0 / non-zero on existing / missing paths on both versions.
+
+7c — pre-PR audit:
+
+- **Date / consistency / security / dependency / docs / test sweep** across the full branch diff (22 files, ~4700 LOC). Done in three passes (consistency + docs, security threat-model, test coverage), each landing as its own commit:
+  - **Date headers** (`87d6712`) — bumped four stale `Last modified` headers in files touched by `be05a32` (the mid-7b metaquery wire-shape redesign). Stale-comment scan found no surviving references to the pre-redesign shape; issue cross-references (#36, #37, #25, #27, #30, #31) all still open; public-API surface confirms only `dispatch_one` is `pub` with helpers private.
+  - **Doc fixes** (`b6982cb`) — corrected two doc-vs-code mismatches surfaced by the audit. `baton-do --zone`'s docstring claimed per-record metaquery `zone` was "the supported way to scope a query to a zone", but `operations::metaquery` actually drops `input.zone` at v1; rewritten to state the v1 limitation honestly. `Arguments.raw`'s comment said `save / raw: baton-get modes`, but only `save` is consulted; documented as accepted-but-no-op alongside `single_server` and `redirect`.
+  - **Coverage tests** (`b3d1a40`) — added five unit tests in `src/types.rs::tests` pinning the `BatonDoEnvelope` custom-`Deserialize` error branches (missing `operation`, missing `target`, unknown operation discriminator, duplicate `operation` key, target-shape-mismatch for a standard op) plus one binary-level integration test (`unknown_operation_discriminator_is_annotated_and_stream_continues`) that exercises the visitor's enum-variant rejection path — distinct from the lexical-JSON parse-failure path already covered.
+- Security audit found no exploitable issues; dependency review confirmed no new direct deps added in 7b/7c (carry-forward `tracing = "0.1"` direct-but-unused already noted in Session 6's deferred list); test-coverage review's deferrable findings (mixed-success-and-error stream test, boundary-input tests, defensive-error-branch unit tests, naming inconsistency `Operation::Move`/`Remove` vs modules `mv`/`rm`, `*_one_annotated` boilerplate consolidation) all carried forward to Session 8 — see Deferred / known gaps below.
 
 **Deferred / known gaps:**
-- `<fill in>`
+
+- **Parse-error wire shape divergence** — baton-rs emits `{"error": {...}}` on a malformed input line; upstream baton-do attempts to echo the input alongside the error, but the input was unparseable so the echo is itself ill-defined in upstream. Tracked as #37 and called out in `baton-do.rs`'s module doc + the parse-error code path.
+- **Cross-zone metaquery scoping is not supported in v1.** `baton-do --zone` and the per-record `MetaqueryInput.zone` field are both currently dropped at the operations layer (`src/operations/metaquery.rs:588-590`); queries run against the local zone only. Wiring zone through requires a different iRODS API and is deferred to Session 8. Per-AVU `AccessQuery.zone` (the user-zone in an ACL filter) **is** wired and tested.
+- **`--single-server` is accepted but a no-op.** Upstream uses it to suppress its own per-record reconnect; baton-rs already reuses the same connection across records (subject to `--connect-time` recycling). Kept so scripts that pass it to upstream don't fail here.
+- **`Arguments.raw` is accepted but a no-op.** Upstream's raw-bytes get mode; baton-rs always returns the inline base64 representation. Documented in `Arguments`'s field-level doc.
+- **No multi-record-with-mixed-success-and-iRODS-error stream test.** Each test stream is either all-success or single-record-failure. The `--no-error` and parse-failure tests exercise the multi-line-with-error path adjacently; symmetry argument applies, revisit if regressions surface.
+- **Naming inconsistency**: wire / `Operation::Move` ↔ Rust module `mv`; wire / `Operation::Remove` ↔ Rust module `rm`. All other operation pairs match. Either rename modules to `move` / `remove` (`r#move`) or rename `Operation` variants — touches API surface so deferred to Session 8.
+- **`*_one_annotated` boilerplate**: five new operations modules (`checksum` / `mkdir` / `rmdir` / `rm` / `mv`) repeat the same 7-line `let fallback = target.clone(); match X(...) { Ok(t) => t, Err(err) => { fallback.set_error(err); fallback }}` pattern. A shared helper would collapse five copies. Refactor deferred to Session 8.
+- **No explicit `--connect-time` recycling test on baton-do.** `ReconnectingSession` is unit-tested in Session 5c; the binary just wires it in. End-to-end recycling test would need a long-running stream and is deferred to Session 8.
+- Inherited deferrals stay in scope for later sessions: per-record `file` field (#30), pluggable `BATON_HASH_SCHEME` (#31, #27), iRODS 5.x in CI (Session 8), accumulate-instead-of-break per-grant errors (#34), upstream CLI-flag gap (`--unsafe` / `--unbuffered` / `--no-clobber` / `--file` / `--buffer-size`, plus `--avu` / `--acl` / `--size` / `--timestamp` on `baton-get` — Session 8).
 
 **Decisions made:**
-- `<fill in>`
 
-**Open questions for next session:**
-- `<fill in>`
+The five open questions from Session 6's carry-forward were settled:
+
+- **JSON envelope shape** — `{"operation", "target", "arguments", "result"|"error"}` matches PLAN.md and upstream byte-for-byte. The non-trivial detail is that `target` is operation-discriminated: standard `Target` for ten operations, richer `MetaqueryInput` (with operator-bearing `AvuQuery` / `TimestampQuery` / `AccessQuery`) for metaquery. Implemented as an `EnvelopeTarget` enum with custom `Deserialize` reading the operation field first. Best-effort mapping would silently drop operators and zone — wire-compat gap not acceptable.
+- **Dispatch mechanism** — `match` on `Operation` enum in `dispatch_one`. Function-pointer table was considered and rejected: the per-op signatures diverge enough (some take `MetaqueryInput`, most take `Target`; per-op options differ) that a uniform fn-pointer signature would force erasure that costs more than the explicit `match` saves. Trait-based dispatch would add ceremony without reducing surface.
+- **Extra operations** — five added (`checksum`, `move`, `remove`, `mkdir`, `rmdir`). Each gets a new shim primitive plus an `operations::` module. All five reuse the `*_one` / `*_one_annotated` pattern from earlier sessions.
+- **`--no-error` mode** — process-exit-code suppression only. Per-input error annotations are still emitted in-band on stdout regardless. Matches upstream's behaviour: the in-band annotation is the "no error" channel, the process exit code is what `--no-error` mutes.
+- **Compat** — wire format and dispatch table match upstream byte-for-byte for the success path and the in-band error path. One documented divergence on the parse-error wire shape (#37); accepted as a divergence rather than a regression because the upstream behaviour echoes unparseable input.
+
+Implementation-detail choices:
+
+- **`#[serde(flatten)]` rejected for `BatonDoOutput`.** Custom `Deserialize` on `BatonDoEnvelope` doesn't compose with flatten — serde's flatten machinery requires the inner type's deserialiser to operate on a content map rather than a freshly-driven map. Inlining the fields keeps the wire-format identical and the deserialiser explicit.
+- **`expect_standard` defensive wrapper** in the dispatcher — converts the `EnvelopeTarget::Query` shape into an internal error in the non-metaquery arms. Can't happen with the custom deserialiser, but cheap insurance against future code changes.
+- **`decorate_result` extracted into `operations::metaquery`** rather than duplicated in the dispatcher — shared with the `baton-metaquery` binary; per-result decoration semantics live in one place.
+- **Parse-error path emits stand-alone error line, not BatonDoOutput.** No envelope means we can't build a full `BatonDoOutput`; emitting `{"error": {...}}` and continuing is the closest behaviour to upstream that's well-defined. Documented in the binary's module doc and tracked in #37.
+- **`--zone` and `--single-server` accepted-but-no-op** rather than rejected. Scripts that pass them to upstream baton-do shouldn't fail when invoking baton-rs; `--zone` warns, `--single-server` debug-logs.
+- **`env!("CARGO_BIN_EXE_baton-do")`** for binary-level integration tests — same pattern used by the other binaries' compat tests, no `assert_cmd` dep.
+
+**Open questions for next session (Session 8 — Polish and compatibility):**
+
+- **iRODS 5.x in CI.** Add a fourth matrix entry. Likely a few shim adjustments (auth probe, query API changes); scope unknown until the matrix run.
+- **`--unsafe` / `--unbuffered` / `--no-clobber` / `--file` / `--buffer-size` flag gap.** None of these are wired in any binary today. `--unbuffered` is the most likely to be load-bearing for partisan; the others are quality-of-life.
+- **`--avu` / `--acl` / `--size` / `--timestamp` on `baton-get`** — upstream supports decoration on get; baton-rs's `baton-get` only emits the path. Probably a `decorate_result` reuse exercise.
+- **Partisan test-suite pass.** End-to-end validation against the downstream consumer that drives the wire-format compat requirement. Likely surfaces edge cases the per-binary tests miss.
+- **`tracing = "0.1"` direct dep.** Either drop or wire `tracing::instrument` for span-based connection-context logging.
 
 ---
 
