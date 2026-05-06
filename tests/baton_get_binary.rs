@@ -132,7 +132,7 @@ fn decoration_size_populates_size_in_inline_mode() {
     assert!(d.error.is_none(), "no error expected: {:?}", d.error);
     assert_eq!(
         d.size,
-        Some(payload.len() as i64),
+        Some(payload.len() as u64),
         "--size should populate size to the byte length",
     );
 }
@@ -231,7 +231,7 @@ fn decoration_works_alongside_save_mode() {
     let d = data_object_unwrap(&targets[0]);
     assert_eq!(
         d.size,
-        Some(payload.len() as i64),
+        Some(payload.len() as u64),
         "decoration should populate size even in --save mode",
     );
     // Verify the bytes also landed on disk.
