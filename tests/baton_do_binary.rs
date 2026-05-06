@@ -878,6 +878,73 @@ fn mixed_success_and_irods_error_in_one_stream() {
     );
 }
 
+#[test]
+fn connect_time_recycles_connection_mid_stream() {
+    // Set --connect-time to its minimum (10s), feed one record,
+    // sleep 11s past the watchdog boundary, then feed a second
+    // record. The watchdog should tear down and rebuild the iRODS
+    // connection at the record boundary; both records should
+    // emit a successful output. End-to-end pin for
+    // ReconnectingSession's integration in `baton-do` — the
+    // watchdog itself is unit-tested in Session 5c, but no test
+    // previously verified the binary-level wiring fires correctly
+    // mid-stream.
+    //
+    // 11-second sleep makes this the slowest test in the suite.
+    // Acceptable cost for the only end-to-end coverage of the
+    // recycle path.
+    let local = "/tmp/baton_rs_bin_recycle_src";
+    std::fs::write(local, b"binary recycle").expect("write");
+    let name = unique_name("baton_rs_bin_recycle");
+    let remote = format!("{}/{}", TEST_COLL, name);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let line = one_envelope_line(BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    ));
+
+    let mut child = Command::new(baton_do_path())
+        .args(["-c", "10"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn baton-do");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(line.as_bytes()).expect("write line 1");
+        stdin.flush().expect("flush");
+        std::thread::sleep(std::time::Duration::from_secs(11));
+        stdin.write_all(line.as_bytes()).expect("write line 2");
+        stdin.flush().expect("flush");
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "both records should succeed across the recycle: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    let outputs = parse_outputs(&stdout);
+    assert_eq!(outputs.len(), 2, "two records expected: {}", stdout);
+    for (i, o) in outputs.iter().enumerate() {
+        assert!(
+            o.error.is_none(),
+            "record {} should succeed across recycle: {:?}",
+            i,
+            o.error
+        );
+    }
+}
+
 // --- Boundary-input coverage ---------------------------------------------
 //
 // Pre-Session-7-PR audit flagged that no test covers paths with
