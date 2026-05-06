@@ -817,6 +817,67 @@ fn multiple_records_dispatched_in_one_invocation() {
     assert_eq!(outputs[2].operation, Operation::Rmdir);
 }
 
+#[test]
+fn mixed_success_and_irods_error_in_one_stream() {
+    // Three-record stream: valid list (success) → valid envelope
+    // for a missing path (in-band iRODS error) → valid list
+    // (success). Pins that the dispatcher continues past per-
+    // input iRODS errors and that subsequent records are
+    // processed normally. Distinct from
+    // parse_failure_is_annotated_and_stream_continues (which
+    // mixes parse failures with success) and from
+    // no_error_flag_suppresses_nonzero_exit_on_per_input_error
+    // (which is a single-record stream).
+    let local = "/tmp/baton_rs_bin_mixed_src";
+    std::fs::write(local, b"binary mixed").expect("write");
+    let name = unique_name("baton_rs_bin_mixed");
+    let remote = format!("{}/{}", TEST_COLL, name);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let missing = unique_name("baton_rs_bin_mixed_missing");
+
+    let ok1 = one_envelope_line(BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    ));
+    let bad = one_envelope_line(BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &missing),
+        Arguments::default(),
+    ));
+    let ok2 = one_envelope_line(BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    ));
+    let input = format!("{}{}{}", ok1, bad, ok2);
+
+    let output = run_baton_do(&[], &input);
+    assert!(
+        !output.status.success(),
+        "mixed stream with one in-band error should exit non-zero",
+    );
+
+    let outputs = parse_outputs(&stdout_str(&output));
+    assert_eq!(outputs.len(), 3, "all three records should be emitted");
+    assert!(
+        outputs[0].error.is_none(),
+        "record 0 should succeed: {:?}",
+        outputs[0].error
+    );
+    assert!(
+        outputs[1].error.is_some(),
+        "record 1 should be annotated with an in-band iRODS error",
+    );
+    assert!(
+        outputs[2].error.is_none(),
+        "record 2 should succeed after the prior error: {:?}",
+        outputs[2].error
+    );
+}
+
 // --- Boundary-input coverage ---------------------------------------------
 //
 // Pre-Session-7-PR audit flagged that no test covers paths with
