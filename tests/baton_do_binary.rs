@@ -816,3 +816,142 @@ fn multiple_records_dispatched_in_one_invocation() {
     assert_eq!(outputs[1].operation, Operation::List);
     assert_eq!(outputs[2].operation, Operation::Rmdir);
 }
+
+// --- Boundary-input coverage ---------------------------------------------
+//
+// Pre-Session-7-PR audit flagged that no test covers paths with
+// spaces, unicode, or deep nesting on any of the new ops. These
+// three tests close that gap with one representative test per
+// boundary, each running multi-record streams to exercise the
+// full pipeline (clap → NDJSON → deserialiser → dispatcher → FFI
+// → iRODS catalog) on non-trivial path shapes.
+
+#[test]
+fn boundary_path_with_spaces_through_checksum_and_rm() {
+    // Spaces in data-object names round-trip through the JSON
+    // envelope, the dispatcher, and the FFI shim's CString
+    // construction. Pins coverage for the new ops on a path
+    // shape common in real-world iRODS deployments.
+    let local = "/tmp/baton_rs_boundary_spaces_src";
+    std::fs::write(local, b"boundary spaces").expect("write");
+    let name = format!("file with spaces {}", std::process::id());
+    let remote = format!("{}/{}", TEST_COLL, name);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let mut args = Arguments::default();
+    args.checksum = true;
+    let checksum_env = BatonDoEnvelope::new_standard(
+        Operation::Checksum,
+        data_object_target(TEST_COLL, &name),
+        args,
+    );
+    let rm_env = BatonDoEnvelope::new_standard(
+        Operation::Remove,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    );
+    let input = format!(
+        "{}{}",
+        one_envelope_line(checksum_env),
+        one_envelope_line(rm_env),
+    );
+    let output = run_baton_do(&[], &input);
+    assert_success_exit(&output);
+
+    let outputs = parse_outputs(&stdout_str(&output));
+    assert_eq!(outputs.len(), 2);
+    for (i, o) in outputs.iter().enumerate() {
+        assert!(o.error.is_none(), "record {} error: {:?}", i, o.error);
+    }
+}
+
+#[test]
+fn boundary_path_with_unicode_through_mkdir_list_rmdir() {
+    // Multi-byte (CJK) characters in collection names exercise
+    // the CString construction and iRODS catalog encoding.
+    // Emoji deliberately omitted — iRODS 4.2.7's catalog is
+    // less tolerant of 4-byte UTF-8 than 4.3.x.
+    let coll_name = format!("baton_rs_boundary_测试_{}", std::process::id());
+    let coll = format!("{}/{}", TEST_COLL, coll_name);
+    let _cleanup = IrodsCleanup(coll.clone());
+
+    let mkdir_env = BatonDoEnvelope::new_standard(
+        Operation::Mkdir,
+        collection_target(&coll),
+        Arguments::default(),
+    );
+    let list_env = BatonDoEnvelope::new_standard(
+        Operation::List,
+        collection_target(&coll),
+        Arguments::default(),
+    );
+    let rmdir_env = BatonDoEnvelope::new_standard(
+        Operation::Rmdir,
+        collection_target(&coll),
+        Arguments::default(),
+    );
+
+    let input = format!(
+        "{}{}{}",
+        one_envelope_line(mkdir_env),
+        one_envelope_line(list_env),
+        one_envelope_line(rmdir_env),
+    );
+    let output = run_baton_do(&[], &input);
+    assert_success_exit(&output);
+
+    let outputs = parse_outputs(&stdout_str(&output));
+    assert_eq!(outputs.len(), 3);
+    for (i, o) in outputs.iter().enumerate() {
+        assert!(o.error.is_none(), "record {} error: {:?}", i, o.error);
+    }
+}
+
+#[test]
+fn boundary_deep_nested_collection_through_mkdir_recursive() {
+    // mkdir --recurse over a 5-level-deep path verifies the
+    // recursive flag flows through to the iCAT and that a
+    // collection at that depth is queryable. rmdir --recurse
+    // --force cleans the whole tree in one shot.
+    let leaf = unique_name("baton_rs_boundary_deep");
+    let deep = format!("{}/{}/a/b/c/d/e", TEST_COLL, leaf);
+    let root = format!("{}/{}", TEST_COLL, leaf);
+    let _cleanup = IrodsCleanup(root.clone());
+
+    let mut mkdir_args = Arguments::default();
+    mkdir_args.recurse = true;
+    let mkdir_env = BatonDoEnvelope::new_standard(
+        Operation::Mkdir,
+        collection_target(&deep),
+        mkdir_args,
+    );
+    let list_env = BatonDoEnvelope::new_standard(
+        Operation::List,
+        collection_target(&deep),
+        Arguments::default(),
+    );
+    let mut rmdir_args = Arguments::default();
+    rmdir_args.recurse = true;
+    rmdir_args.force = true;
+    let rmdir_env = BatonDoEnvelope::new_standard(
+        Operation::Rmdir,
+        collection_target(&root),
+        rmdir_args,
+    );
+
+    let input = format!(
+        "{}{}{}",
+        one_envelope_line(mkdir_env),
+        one_envelope_line(list_env),
+        one_envelope_line(rmdir_env),
+    );
+    let output = run_baton_do(&[], &input);
+    assert_success_exit(&output);
+
+    let outputs = parse_outputs(&stdout_str(&output));
+    assert_eq!(outputs.len(), 3);
+    for (i, o) in outputs.iter().enumerate() {
+        assert!(o.error.is_none(), "record {} error: {:?}", i, o.error);
+    }
+}
