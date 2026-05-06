@@ -694,6 +694,55 @@ fn parse_failure_is_annotated_and_stream_continues() {
 }
 
 #[test]
+fn unknown_operation_discriminator_is_annotated_and_stream_continues() {
+    // Lexically valid JSON with an unknown `operation` value
+    // exercises a different deserialise path from `not-json`:
+    // the envelope visitor rejects when parsing the Operation
+    // enum, not at JSON-syntax level. Should still surface as a
+    // stand-alone {"error": ...} line and the stream should
+    // continue — same observable behaviour as a syntactic parse
+    // failure.
+    let local = "/tmp/baton_rs_bin_unknownop_src";
+    std::fs::write(local, b"binary unknownop").expect("write");
+    let name = unique_name("baton_rs_bin_unknownop");
+    let remote = format!("{}/{}", TEST_COLL, name);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let bad = r#"{"operation":"frobnicate","target":{"collection":"/x"}}"#;
+    let good = one_envelope_line(BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    ));
+    let input = format!("{}\n{}", bad, good);
+
+    let output = run_baton_do(&[], &input);
+    assert!(
+        !output.status.success(),
+        "unknown operation discriminator should produce non-zero exit",
+    );
+
+    let lines = parse_value_lines(&stdout_str(&output));
+    assert_eq!(
+        lines.len(),
+        2,
+        "one error line + one list line: {:?}",
+        lines
+    );
+    assert!(
+        lines[0].get("error").is_some(),
+        "first line should be a stand-alone error: {}",
+        lines[0],
+    );
+    assert!(
+        lines[1].get("operation").is_some(),
+        "second line should be a normal output envelope: {}",
+        lines[1],
+    );
+}
+
+#[test]
 fn file_arg_reads_envelopes_from_disk() {
     // Same test as the list smoke, but inputs come from --file
     // instead of stdin.

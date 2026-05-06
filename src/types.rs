@@ -1683,4 +1683,66 @@ mod tests {
         assert_eq!(env_q.operation, Operation::Metaquery);
         assert!(matches!(env_q.target, EnvelopeTarget::Query(_)));
     }
+
+    #[test]
+    fn baton_do_envelope_rejects_missing_operation() {
+        let json = r#"{"target": {"collection": "/x", "data_object": "y"}}"#;
+        let err = serde_json::from_str::<BatonDoEnvelope>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("operation"),
+            "missing-operation error should mention the field; got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn baton_do_envelope_rejects_missing_target() {
+        let json = r#"{"operation": "list"}"#;
+        let err = serde_json::from_str::<BatonDoEnvelope>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("target"),
+            "missing-target error should mention the field; got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn baton_do_envelope_rejects_unknown_operation_discriminator() {
+        let json = r#"{"operation": "frobnicate", "target": {"collection": "/x"}}"#;
+        let err = serde_json::from_str::<BatonDoEnvelope>(json).unwrap_err();
+        // serde rejects when parsing the Operation enum, before
+        // we get to the per-operation target shape check.
+        assert!(
+            err.to_string().to_lowercase().contains("frobnicate")
+                || err.to_string().to_lowercase().contains("unknown variant"),
+            "unknown-discriminator error should identify the bad value; got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn baton_do_envelope_rejects_duplicate_operation_key() {
+        let json = r#"{"operation": "list", "operation": "remove", "target": {"collection": "/x"}}"#;
+        let err = serde_json::from_str::<BatonDoEnvelope>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "duplicate-operation error should say so; got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn baton_do_envelope_rejects_target_shape_mismatch_for_standard_op() {
+        // `list` is a standard operation and so requires a
+        // `Target` shape (Collection or DataObject — both carry a
+        // `collection` field). A bare `{"avus": [...]}` is the
+        // metaquery shape and shouldn't deserialise as a Target.
+        // We just pin the fact-of-rejection; the precise message
+        // depends on serde_json's untagged-enum reporting.
+        let json = r#"{"operation": "list", "target": {"avus": []}}"#;
+        assert!(
+            serde_json::from_str::<BatonDoEnvelope>(json).is_err(),
+            "list op with metaquery-shaped target should be rejected"
+        );
+    }
 }
