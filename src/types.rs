@@ -326,6 +326,13 @@ pub struct MetamodInput {
 }
 
 impl MetamodInput {
+    /// Annotate this input with an error. Symmetric with
+    /// [`Target::set_error`] so the operations layer's
+    /// `annotate_failure` helper can drive both uniformly.
+    pub fn set_error(&mut self, err: BatonError) {
+        self.error = Some(err);
+    }
+
     /// Project this input into the [`Target`] form the connection layer
     /// understands. The resulting `DataObject` / `Collection` carries
     /// only path identity — none of the metadata fields are populated.
