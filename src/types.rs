@@ -272,6 +272,18 @@ impl Target {
             Target::Collection(c) => c.error = Some(err),
         }
     }
+
+    /// Whether this target already carries an in-band error
+    /// annotation. Used by per-record post-processing helpers
+    /// (e.g. [`crate::operations::metaquery::decorate_result`])
+    /// to skip work that would either hide the original error or
+    /// pile a second one on top.
+    pub fn has_error(&self) -> bool {
+        match self {
+            Target::DataObject(d) => d.error.is_some(),
+            Target::Collection(c) => c.error.is_some(),
+        }
+    }
 }
 
 /// One operation `baton-metamod` can perform per input line.

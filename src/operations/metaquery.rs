@@ -78,14 +78,25 @@ impl DecorationOptions {
 /// result in-band rather than aborting the whole stream — same
 /// shape `*_one_annotated` uses elsewhere.
 ///
-/// Used by both the `baton-metaquery` binary and the `baton-do`
-/// dispatcher's metaquery path; lifting the helper here keeps
+/// If the input already carries an error annotation (e.g.
+/// because the upstream operation that produced it failed),
+/// return it unchanged. Decorating a failed target would either
+/// hide the original error (size / checksum stat overwrites) or
+/// pile a second one on top.
+///
+/// Used by the `baton-metaquery` binary, the `baton-do`
+/// dispatcher's metaquery path, and (since 8c) `baton-get` for
+/// optional per-record decoration. Lifting the helper here keeps
 /// decoration semantics in one place.
 pub fn decorate_result(
     conn: &mut RodsConnection,
     mut target: Target,
     opts: &DecorationOptions,
 ) -> Target {
+    if target.has_error() {
+        return target;
+    }
+
     // Size / checksum live on the stat path, not the catalog.
     // Only run the stat round-trip if either flag is set.
     if opts.size || opts.checksum {
