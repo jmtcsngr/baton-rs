@@ -312,37 +312,66 @@ fn put_annotated_error_for_missing_local_file() {
 }
 
 #[test]
-fn put_annotated_error_for_missing_directory_field() {
-    // The input record carries no `directory` field. `baton-put`
-    // refuses early — there's no sensible default for the local
-    // source — and surfaces the error in band.
+fn put_uses_file_field_when_distinct_from_data_object() {
+    // Per-record `file` overrides `data_object` for the local
+    // source basename, mirroring upstream baton's
+    // `json_to_local_path` priority. Both extendo and partisan
+    // emit this shape; pin that bytes from <directory>/<file>
+    // (NOT <directory>/<data_object>) reach iRODS as
+    // <collection>/<data_object>.
+    let upload_dir = "/tmp/baton_rs_put_file_dir";
+    let local_basename = "renamed_local_source.bin";
+    let data_object = "baton_rs_put_file_obj";
+    std::fs::create_dir_all(upload_dir).expect("create upload dir");
+    let upload_local = PathBuf::from(format!("{}/{}", upload_dir, local_basename));
+    let content: &[u8] = b"renamed local path put round trip";
+    std::fs::write(&upload_local, content).expect("write source");
+    let _local_cleanup = LocalCleanup(upload_local);
+    // A file at <upload_dir>/<data_object> would let a regression
+    // (one that ignores `file`) silently succeed by reading the
+    // wrong source. Make sure no such file exists.
+    let _ = std::fs::remove_file(format!("{}/{}", upload_dir, data_object));
+
+    let remote_coll = "/testZone/home/irods";
+    let remote = format!("{}/{}", remote_coll, data_object);
+    let _cleanup = IrodsCleanup(remote.clone());
+
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
 
     let input = Target::DataObject(DataObject {
-        collection: "/testZone/home/irods".to_string(),
-        data_object: "baton_rs_put_no_dir_obj".to_string(),
+        collection: remote_coll.to_string(),
+        data_object: data_object.to_string(),
         size: None,
         checksum: None,
         data: None,
-        directory: None,
-        file: None,
+        directory: Some(upload_dir.to_string()),
+        file: Some(local_basename.to_string()),
         avus: None,
         access: None,
         replicates: None,
         timestamps: None,
         error: None,
     });
-    let output = put_one_annotated(&mut conn, input, &PutOptions::default());
+    let output = put_one(&mut conn, input, &PutOptions::default()).expect("put_one with file");
+
     let d = match output {
         Target::DataObject(d) => d,
         other => panic!("expected DataObject, got {:?}", other),
     };
-    let err = d.error.as_ref().expect("expected error annotation");
-    assert!(
-        err.message.contains("directory"),
-        "error message should mention the missing directory field: {:?}",
-        err
+    assert_eq!(
+        d.file.as_deref(),
+        Some(local_basename),
+        "put should echo the input `file` field on the output"
+    );
+
+    // Round-trip via fetch_inline_bytes to confirm the bytes that
+    // landed at <collection>/<data_object> are the ones from
+    // <directory>/<file>.
+    let fetched = fetch_inline_bytes(&mut conn, remote_coll, data_object);
+    assert_eq!(
+        fetched, content,
+        "iRODS should receive bytes from <directory>/<file>, not <directory>/<data_object>"
     );
 }
 
