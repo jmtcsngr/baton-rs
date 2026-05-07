@@ -565,7 +565,11 @@ fn binary_dispatches_checksum_rejects_verify_and_calculate_combo() {
         data_object_target(TEST_COLL, &name),
         args,
     );
-    let output = run_baton_do(&[], &one_envelope_line(env));
+    // --no-error so the in-band annotation is observable without
+    // the binary's per-input-error exit-code policy interfering.
+    // The exit-code policy itself is covered by
+    // `no_error_flag_suppresses_nonzero_exit_on_per_input_error`.
+    let output = run_baton_do(&["--no-error"], &one_envelope_line(env));
     assert_success_exit(&output);
 
     let outputs = parse_outputs(&stdout_str(&output));
