@@ -715,17 +715,32 @@ fn get_save_streams_multi_chunk_payload() {
 }
 
 #[test]
-fn get_save_errors_when_directory_missing_from_input() {
-    // --save with no `directory` field on the input: per-input error,
-    // stream continues. Driving get_one_annotated rather than get_one
-    // confirms the error annotates in band rather than aborting.
-    let local = "/tmp/baton_rs_get_save_no_dir";
-    std::fs::write(local, b"x").expect("write");
+fn get_save_uses_file_field_when_distinct_from_data_object() {
+    // Per-record `file` field overrides the iRODS-side `data_object`
+    // for the local basename, mirroring upstream baton's
+    // `json_to_local_path` priority. Both extendo and partisan emit
+    // this shape; pin that bytes land at <directory>/<file> and
+    // NOT at <directory>/<data_object>.
+    let upload_local = "/tmp/baton_rs_get_save_file_upload";
+    let download_dir = "/tmp/baton_rs_get_save_file_dl";
+    let content: &[u8] = b"renamed local path round trip";
+    std::fs::write(upload_local, content).expect("write source");
+    std::fs::create_dir_all(download_dir).expect("create download dir");
+
     let remote_coll = "/testZone/home/irods";
-    let data_object = "baton_rs_get_save_no_dir";
+    let data_object = "baton_rs_get_save_file_obj";
+    let local_basename = "renamed_local.bin";
     let remote = format!("{}/{}", remote_coll, data_object);
-    iput(local, &remote);
+    iput(upload_local, &remote);
     let _cleanup = IrodsCleanup(remote);
+
+    let download_local = PathBuf::from(format!("{}/{}", download_dir, local_basename));
+    let _local_cleanup = LocalCleanup(download_local.clone());
+    // Belt-and-braces: also clean up any file at the
+    // <directory>/<data_object> location so a regression that
+    // ignores `file` would leak observable evidence.
+    let unwanted_local = PathBuf::from(format!("{}/{}", download_dir, data_object));
+    let _unwanted_cleanup = LocalCleanup(unwanted_local.clone());
 
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
@@ -736,8 +751,8 @@ fn get_save_errors_when_directory_missing_from_input() {
         size: None,
         checksum: None,
         data: None,
-        directory: None,
-        file: None,
+        directory: Some(download_dir.to_string()),
+        file: Some(local_basename.to_string()),
         avus: None,
         access: None,
         replicates: None,
@@ -746,19 +761,26 @@ fn get_save_errors_when_directory_missing_from_input() {
     });
 
     let opts = GetOptions { save: true };
-    let output = get_one_annotated(&mut conn, input, &opts);
+    let output = get_one(&mut conn, input, &opts).expect("get_one --save with file");
+
     let d = match output {
         Target::DataObject(d) => d,
         other => panic!("expected DataObject, got {:?}", other),
     };
-    let err = d
-        .error
-        .as_ref()
-        .expect("expected error annotation when directory missing");
+    assert_eq!(
+        d.file.as_deref(),
+        Some(local_basename),
+        "--save should echo the input `file` field on the output"
+    );
+
+    let written = std::fs::read(&download_local).expect("read local copy at file path");
+    assert_eq!(
+        written, content,
+        "bytes should land at <directory>/<file>, not <directory>/<data_object>"
+    );
     assert!(
-        err.message.contains("directory"),
-        "error message should mention the missing directory field, got {:?}",
-        err
+        !unwanted_local.exists(),
+        "no file should land at <directory>/<data_object> when `file` is set"
     );
 }
 
