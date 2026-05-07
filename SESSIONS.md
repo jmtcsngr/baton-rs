@@ -30,6 +30,7 @@ Conventions adopted during Session 1 that apply to all subsequent sessions. Fill
 - **JSON key ordering:** serde default; structural comparison in compatibility tests (not byte-for-byte)
 - **Short-form JSON aliases:** types accept both long (`attribute`/`value`/`units`) and short (`a`/`v`/`u`) forms via serde `alias`; emit long form on serialise
 - **iRODS FFI strategy:** all iRODS API calls go through `shim/ffi_shim.{c,h}` (compiled by `cc` into a static library and linked alongside `irods_client` / `irods_common`). The Rust crate sees only the hand-written mirror in `src/ffi.rs` — no bindgen, no libclang. Adopted in Session 4.5 (issue #9). Adding a new iRODS API means declaring it in both `shim/ffi_shim.h` and `src/ffi.rs`, and writing the implementation in `shim/ffi_shim.c`.
+- **`STRICT_BATON_COMPAT` env var:** every binary's `--version` flag, and any future cross-cutting compat shim (parse-error wire shape #37, partisan-flavoured args, …), gates on this single env var. Unset → honest reporting (baton-rs crate version, etc.). Set to any non-empty value → upstream-compat behaviour. The version reported under strict mode is `BATON_COMPAT_VERSION` in `src/version.rs`, kept in lockstep with the `Target baton version for parity` pin above. Bumping that pin is part of the release checklist (#58). Adopted in Session 8 (issue #58).
 
 ---
 

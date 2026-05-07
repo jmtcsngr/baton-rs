@@ -1048,6 +1048,112 @@ fn server_version_flag_prints_xyz_and_exits_zero() {
     );
 }
 
+#[test]
+fn version_flag_unset_reports_crate_version() {
+    // `baton-do --version` (no STRICT_BATON_COMPAT in env) reports the
+    // running baton-rs crate version verbatim. Doesn't connect to
+    // iRODS — short-circuits before any IO. partisan's
+    // `client_version()` (`partisan/src/partisan/irods.py:1589-1600`)
+    // parses the output as `<X>.<Y>.<Z>` so the bare crate version
+    // shape is also pinned.
+    let mut child = Command::new(baton_do_path())
+        .args(["--version"])
+        .env_remove("STRICT_BATON_COMPAT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn baton-do --version");
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait_with_output");
+    assert!(
+        output.status.success(),
+        "--version should exit 0: status={:?} stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let line = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert_eq!(
+        line.trim_end(),
+        env!("CARGO_PKG_VERSION"),
+        "--version should print the baton-rs crate version when STRICT_BATON_COMPAT is unset"
+    );
+    assert!(
+        line.ends_with('\n'),
+        "--version output should end with newline (matches partisan's .strip()), got {:?}",
+        line
+    );
+}
+
+#[test]
+fn version_flag_with_strict_compat_reports_compat_version() {
+    // STRICT_BATON_COMPAT=1 → report BATON_COMPAT_VERSION instead
+    // (currently 6.0.0). Lets partisan's `client_version()` parse
+    // the result and compare it against expected baton X.Y.Z values.
+    let mut child = Command::new(baton_do_path())
+        .args(["--version"])
+        .env("STRICT_BATON_COMPAT", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn baton-do --version with STRICT_BATON_COMPAT=1");
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait_with_output");
+    assert!(output.status.success(), "exit 0");
+
+    let line = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert_eq!(
+        line.trim_end(),
+        baton_rs::BATON_COMPAT_VERSION,
+        "with STRICT_BATON_COMPAT set, --version should print BATON_COMPAT_VERSION"
+    );
+}
+
+#[test]
+fn version_flag_with_strict_compat_truthy_value_reports_compat_version() {
+    // Any-non-empty semantics: arbitrary string flips the toggle,
+    // matching RUST_LOG / RUST_BACKTRACE convention. Pins that we
+    // don't accidentally narrow to "1" / "true" parsing.
+    let mut child = Command::new(baton_do_path())
+        .args(["--version"])
+        .env("STRICT_BATON_COMPAT", "anything-nonempty")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait_with_output");
+    assert!(output.status.success());
+    let line = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert_eq!(line.trim_end(), baton_rs::BATON_COMPAT_VERSION);
+}
+
+#[test]
+fn version_flag_with_strict_compat_empty_value_falls_through_to_crate_version() {
+    // Empty value treated as unset (matches RUST_LOG); --version
+    // returns the real crate version.
+    let mut child = Command::new(baton_do_path())
+        .args(["--version"])
+        .env("STRICT_BATON_COMPAT", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait_with_output");
+    assert!(output.status.success());
+    let line = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert_eq!(line.trim_end(), env!("CARGO_PKG_VERSION"));
+}
+
 // --- Boundary-input coverage ---------------------------------------------
 //
 // Pre-Session-7-PR audit flagged that no test covers paths with
