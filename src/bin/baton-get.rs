@@ -103,6 +103,15 @@ struct Args {
     /// Silent logging (ERROR level only).
     #[arg(long)]
     silent: bool,
+
+    /// Print the client version on stdout and exit. By default
+    /// reports the baton-rs crate version. With the
+    /// `STRICT_BATON_COMPAT` env var set to any non-empty value,
+    /// reports the upstream baton release we target wire-compat
+    /// with — see #58 for the rationale and the README for the
+    /// full toggle docs.
+    #[arg(long)]
+    version: bool,
 }
 
 impl Args {
@@ -157,6 +166,12 @@ fn init_tracing(args: &Args) {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.version {
+        println!("{}", baton_rs::report_version());
+        return Ok(());
+    }
+
     init_tracing(&args);
 
     let opts = args.to_options();
