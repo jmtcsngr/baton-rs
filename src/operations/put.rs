@@ -155,9 +155,10 @@ pub fn put_one(
         // explicitly via `ChecksumOptions`.
         let server_chksum = conn.checksum_data_object(&path, 0)?;
         if let Some(ctx) = hash {
-            // `ctx.compute()` consumes the context and returns a
+            // `ctx.finalize()` consumes the context and returns a
             // Digest that formats as 32 lowercase hex via {:x}.
-            let client_hex = format!("{:x}", ctx.compute());
+            // (Renamed from `compute()` in md5 0.8 — bumped via #46.)
+            let client_hex = format!("{:x}", ctx.finalize());
             // verify_checksum returns Err on mismatch; the caller
             // (put_one_annotated, in the binary's NDJSON loop)
             // surfaces it as an in-band annotation. The mismatched
