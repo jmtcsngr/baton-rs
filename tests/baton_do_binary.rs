@@ -115,6 +115,7 @@ fn data_object_target(collection: &str, data_object: &str) -> Target {
         checksum: None,
         data: None,
         directory: None,
+        file: None,
         avus: None,
         access: None,
         replicates: None,
@@ -244,6 +245,7 @@ fn binary_dispatches_put_with_checksum() {
         checksum: None,
         data: None,
         directory: Some(dir.to_string()),
+        file: None,
         avus: None,
         access: None,
         replicates: None,
@@ -294,6 +296,7 @@ fn binary_dispatches_chmod_grants_public_read() {
         checksum: None,
         data: None,
         directory: None,
+        file: None,
         avus: None,
         access: Some(vec![Acl {
             owner: "public".to_string(),
@@ -368,6 +371,7 @@ fn binary_dispatches_metamod_add_avu() {
         checksum: None,
         data: None,
         directory: None,
+        file: None,
         avus: Some(vec![Avu {
             attribute: attr.to_string(),
             value: value.clone(),
