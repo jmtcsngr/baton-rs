@@ -1,0 +1,78 @@
+name: "Run tests against iRODS (reusable)"
+
+# Reusable workflow that brings up an iRODS server in a service
+# container and runs an arbitrary build / test script inside a
+# build-image container that's networked to it.
+#
+# Callers parameterise:
+#   - which iRODS version to label the run with (display only)
+#   - which iRODS server image to start as the service container
+#   - which build image to run the test step in
+#   - which script the build image should execute
+#
+# The crate's own unit tests live in `unit-tests.yml`. Future
+# downstream-consumer compat workflows (partisan, extendo, …) call
+# this same reusable workflow with their language-appropriate
+# build image and a build-script that runs their test suite,
+# avoiding duplication of the iRODS service-container setup.
+
+on:
+  workflow_call:
+    inputs:
+      irods_version:
+        description: "iRODS version label, used in the job name."
+        required: true
+        type: string
+      server_image:
+        description: "Container image for the iRODS server service."
+        required: true
+        type: string
+      build_image:
+        description: "Container image for the build/test runner."
+        required: true
+        type: string
+      build_script:
+        description: "Workspace-relative path of the script the build image runs."
+        required: true
+        type: string
+      experimental:
+        description: "Treat job failure as soft (continue-on-error)."
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    name: "iRODS ${{ inputs.irods_version }}"
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ inputs.experimental }}
+
+    services:
+      irods-server:
+        image: ${{ inputs.server_image }}
+        ports:
+          - "1247:1247"
+          - "20000-20199:20000-20199"
+        volumes:
+          - /dev/shm:/dev/shm
+        options: >-
+          --health-cmd "nc -z -v localhost 1247"
+          --health-start-period 60s
+          --health-interval 10s
+          --health-timeout 20s
+          --health-retries 6
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      - name: "Build and test"
+        uses: wtsi-npg/build-irods-client-action@v1.1.1
+        with:
+          build-image: ${{ inputs.build_image }}
+          build-script: ${{ inputs.build_script }}
+          docker-network: ${{ job.services.irods-server.network }}
+
+      - name: "Show test log"
+        if: ${{ failure() }}
+        run: find "$GITHUB_WORKSPACE" -name "*.log" -exec cat {} \;
