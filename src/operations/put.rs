@@ -7,8 +7,16 @@
 //!
 //! Symmetric with `baton-get --save`: the input record names the
 //! iRODS destination via `collection` + `data_object` and the local
-//! source via `directory` (the local file is `<directory>/<data_object>`).
-//! Same name on both sides; renaming is out of scope.
+//! source path via the `json_to_local_path` priority
+//! (`baton/src/json.c:1211-1244`):
+//!
+//! 1. `<directory>/<file>` if both are present
+//! 2. `<directory>/<data_object>` if `file` is absent
+//! 3. `./<file>` if `directory` is absent but `file` is present
+//! 4. `./<data_object>` if neither is present
+//!
+//! `file` is preferred over `data_object` for the local basename;
+//! renaming on the iRODS side stays the `data_object` field.
 //!
 //! `--checksum` populates the output `checksum` field with iRODS's
 //! post-close digest. `--verify` additionally hashes bytes
@@ -60,9 +68,15 @@ const WRITE_CHUNK_SIZE: usize = 64 * 1024;
 ///
 /// Required input fields:
 ///   - `collection`: target iRODS collection
-///   - `data_object`: target name (also the local filename)
-///   - `directory`: local source directory; the file at
-///     `<directory>/<data_object>` is uploaded
+///   - `data_object`: target name on the iRODS side
+///
+/// Optional input fields:
+///   - `directory`: local source directory (defaults to the
+///     process cwd if absent)
+///   - `file`: local file name (defaults to `data_object` if absent)
+///
+/// The local source path is built per upstream's
+/// `json_to_local_path` priority — see the module-level doc.
 ///
 /// The output is the input record echoed back, with `checksum`
 /// populated when `opts.checksum` or `opts.verify` is set. On a
@@ -91,12 +105,17 @@ pub fn put_one(
         }
     };
 
-    let directory = data_obj.directory.as_deref().ok_or(BatonError {
-        code: -1,
-        message: "baton-put requires a `directory` field on each input record".to_string(),
-    })?;
+    // Path priority mirrors `json_to_local_path` in
+    // `baton/src/json.c:1211-1244`. `directory` defaults to "."
+    // (cwd) and `file` is preferred over `data_object` for the
+    // local basename.
+    let directory = data_obj.directory.as_deref().unwrap_or(".");
+    let basename = data_obj
+        .file
+        .as_deref()
+        .unwrap_or(&data_obj.data_object);
     let mut local_path = PathBuf::from(directory);
-    local_path.push(&data_obj.data_object);
+    local_path.push(basename);
 
     let mut file = File::open(&local_path).map_err(|e| BatonError {
         code: -1,

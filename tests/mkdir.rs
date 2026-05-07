@@ -180,6 +180,7 @@ fn mkdir_on_data_object_target_is_error() {
         checksum: None,
         data: None,
         directory: None,
+        file: None,
         avus: None,
         access: None,
         replicates: None,

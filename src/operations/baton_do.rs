@@ -396,6 +396,7 @@ mod tests {
             checksum: None,
             data: None,
             directory: None,
+            file: None,
             avus: None,
             access: None,
             replicates: None,

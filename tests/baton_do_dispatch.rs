@@ -56,6 +56,7 @@ fn data_object_target(collection: &str, data_object: &str) -> Target {
         checksum: None,
         data: None,
         directory: None,
+        file: None,
         avus: None,
         access: None,
         replicates: None,

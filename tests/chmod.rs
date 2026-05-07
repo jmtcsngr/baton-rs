@@ -101,6 +101,7 @@ fn data_object_target(collection: &str, data_object: &str, access: Option<Vec<Ac
         checksum: None,
         data: None,
         directory: None,
+        file: None,
         avus: None,
         access,
         replicates: None,
