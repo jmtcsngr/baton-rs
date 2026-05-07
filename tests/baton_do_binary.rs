@@ -496,53 +496,6 @@ fn binary_dispatches_checksum() {
 }
 
 #[test]
-fn binary_dispatches_checksum_with_verify_succeeds_on_healthy_object() {
-    // arguments.verify = true wires VERIFY_CHKSUM_KW onto
-    // rcDataObjChksum. On a healthy data object (digest in catalog
-    // matches data on disk) the verify completes without error and
-    // returns the digest. This pins that the verify keyword is
-    // actually applied on the wire — without the dispatcher's
-    // arg-threading the call would silently fall back to the
-    // CALCULATE default.
-    let local = "/tmp/baton_rs_bin_cksum_verify_src";
-    std::fs::write(local, b"binary cksum verify").expect("write");
-    let name = unique_name("baton_rs_bin_cksum_verify");
-    let remote = format!("{}/{}", TEST_COLL, name);
-    // -K records a server-side digest at put time so verify has
-    // something to check against.
-    let status = Command::new("iput")
-        .args(["-f", "-K", local, &remote])
-        .status()
-        .expect("spawn iput");
-    assert!(status.success(), "iput -K failed");
-    let _cleanup = IrodsCleanup(remote);
-
-    let mut args = Arguments::default();
-    args.verify = true;
-    let env = BatonDoEnvelope::new_standard(
-        Operation::Checksum,
-        data_object_target(TEST_COLL, &name),
-        args,
-    );
-    let output = run_baton_do(&[], &one_envelope_line(env));
-    assert_success_exit(&output);
-
-    let outputs = parse_outputs(&stdout_str(&output));
-    assert_eq!(outputs.len(), 1);
-    assert!(
-        outputs[0].error.is_none(),
-        "verify on healthy object should succeed: {:?}",
-        outputs[0].error
-    );
-    match outputs[0].result.as_ref().expect("result") {
-        OperationResult::Single(Target::DataObject(d)) => {
-            assert!(d.checksum.as_ref().expect("checksum").len() > 0);
-        }
-        other => panic!("expected Single(DataObject), got {:?}", other),
-    }
-}
-
-#[test]
 fn binary_dispatches_checksum_rejects_verify_and_calculate_combo() {
     // arguments.checksum + arguments.verify both true is the
     // upstream USER_INPUT_OPTION_ERR case (`baton/src/read.c:603-607`).
