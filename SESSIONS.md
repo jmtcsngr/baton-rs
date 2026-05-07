@@ -482,21 +482,39 @@ Implementation-detail choices:
 
 ### Session 8 — Polish and compatibility
 
-**Status:** `<not started>`
+**Status:** in progress (8a / 8b / 8c merged; 8d planned post-recon).
 
-**Goal:** `--unbuffered`, `--unsafe`, in-band error JSON, `--connect-time` verification, partisan test-suite pass, add iRODS 5.x to CI.
+**Goal (post-recon):** Close the wire-compat gaps that block downstream consumers, then validate end-to-end against the partisan (Python) and extendo (Go) test suites. Originally framed around CLI-flag parity (`--unbuffered` / `--unsafe` / etc.); after a recon pass against five wtsi-npg repos (see #39 update on 2026-05-07) those flags were re-classified as not partisan/extendo-blocking and pushed to a future session. iRODS 5.x compatibility moved to its own tracking issue (#40).
 
-**Completed:**
-- `<fill in>`
+**Completed sub-sessions:**
+
+- **8a — housekeeping & deferred-test closure** (PR #41, merged 2026-05-06). `Annotatable` trait + `annotate_failure` helper collapse nine `*_one_annotated` functions across the operations layer; boundary-input tests (spaces / unicode / deep nesting); mixed-success-and-iRODS-error stream test; end-to-end `--connect-time` recycle test on `baton-do`. The "drop unused `tracing` direct dep" carry-forward from Session 6 dissolved — `tracing::warn!` / `debug!` are genuinely used in `baton-do.rs` since 7b.
+- **8b — `Operation::Move` → `Mv`, `Remove` → `Rm` rename** (PR #43, merged 2026-05-06). Restores the variant-↔-module pairing across all 11 operations (`Mv` ↔ `mv`, `Rm` ↔ `rm`, matching the `Mkdir`/`Rmdir` abbreviation pattern). Wire format preserved via explicit `#[serde(rename = "move"/"remove")]` attributes (the original `#[serde(rename_all = "lowercase")]` would otherwise have changed the wire form).
+- **8c — `baton-get` decoration parity** (PR #45, merged 2026-05-06). Six decoration flags (`--avu` / `--acl` / `--size` / `--checksum` / `--replicate` / `--timestamp`) wired into `baton-get` via the shared `decorate_result` helper extracted in 7b. Skip-on-error guard added to `decorate_result` so an errored get isn't masked by a follow-up stat. New `Target::has_error()` accessor.
+
+**Pending sub-sessions (post-recon plan, see #39):**
+
+- **8d — wire-compat gaps for partisan/extendo:** per-record `file` field on `DataObject` (#30), `checksum` operation args naming (`{calculate, recalculate, verify}` vs `{force, verify}` — needs upstream-source check), `baton-do --server-version` for health checks, `force` / `verify` threaded through the `get` op.
+- **8e — cross-zone metaquery scoping** + **accumulate-instead-of-break for chmod** (#34). Lower partisan-blocking urgency; optionally bundled with 8d.
+- **8f — partisan / extendo test-suite validation.** Run their suites against baton-rs binaries, surface anything missed.
 
 **Deferred / known gaps:**
-- `<fill in>`
 
-**Decisions made:**
-- `<fill in>`
+- **CLI-flag parity** (`--unbuffered` / `--unsafe` / `--no-clobber` / `--file` / `--buffer-size`) — re-classified post-recon as not partisan/extendo-blocking; deferred to a future session.
+- **iRODS 5.x compatibility** — separate tracking issue (#40).
+- **Pluggable `BATON_HASH_SCHEME`** (#27, #31) — stays deferred unless 8f surfaces a partisan fixture that needs SHA2.
 
-**Open questions for next session:**
-- `<fill in>`
+**Decisions made (so far):**
+
+- **`Operation::Move`/`Remove` rename direction**: rename the Rust variants (option A) rather than the modules (option B). Keeps `r#move` / `r#remove` raw-identifier ugliness out of the codebase; wire format stays the same via per-variant `#[serde(rename)]`.
+- **`baton-get` decoration scope**: all six DecorationOptions fields rather than only the four (`--avu` / `--acl` / `--size` / `--timestamp`) listed in #39. Matches `baton-list` parity at no extra implementation cost.
+- **`tracing` direct dep stays** — used in `baton-do.rs` since 7b. The Session 6 carry-forward was stale.
+- **Recon-driven re-prioritisation** (2026-05-07): partisan and extendo both target only `baton-do`, which means the CLI-flag-parity work is not on the partisan critical path. Real partisan-blocking gaps are at the wire-format level (see #39 update).
+
+**Open questions (carried into 8d):**
+
+- **`checksum` args naming**: does upstream baton accept both `{calculate, recalculate}` and `{force}` as aliases, or do partisan and extendo each tolerate the other's spelling? Needs upstream-source check before settling baton-rs's Arguments shape.
+- **`force` semantics on `get`**: partisan sends `{force, save, verify, redirect}` for `--save`-style get; what does upstream baton do with `force` on a get? (Likely "overwrite local file if it exists".)
 
 ---
 
@@ -532,3 +550,6 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-04-29` — Session 5 started on branch `feat/session-5-get-put`. Split into 5a/5b/5c; up-front decisions on streaming MD5 (client-side on put) and replicate sizing (highest-numbered valid replica). `--connect-time` wiring deferred to 5c.
 - `2026-05-01` — Session 5 completed. `baton-get` (inline + `--save`) and `baton-put` (streaming MD5, `--checksum`, `--verify`) landed; replicate-aware sizing wired into `baton-list` for `--size` / `--checksum`; `--connect-time` wired across all five active binaries via the `ReconnectingSession` watchdog (default 600s, min 10s, between-records only — matches upstream). `base64` added as a runtime dep; `md5` promoted from dev-dep to runtime dep. Three follow-up issues opened: #30 (per-record `file` field for renamed local paths), #31 (pluggable `BATON_HASH_SCHEME`), #27 (companion CI matrix for the hash-scheme axis). Session tracked in #28.
 - `2026-05-01` — Session 6 completed on branch `feat/session-6-chmod` (8 commits). `baton-chmod` wired with `--recurse`; settled the five gap-analysis questions from Session 5's carry-forward via upstream-source citations. Sixth of seven baton binaries with a real implementation — only `baton-do` (Session 7) remains a stub. `parse_acl_level` extended to accept iRODS 4.3.x's underscore-separated forms (`read_object` / `modify_object`); the gap was undetected before because earlier list-only tests only read default-server ACL state. One follow-up issue opened: #34 (per-grant accumulate-vs-break alternative). Session tracked in #33.
+- `2026-05-06` — Session 7 completed on branch `feat/session-7-baton-do` (18 commits across 7a / 7b / 7c). `baton-do` wired with the full clap surface; 11-arm dispatcher in `operations::baton_do`; `BatonDoEnvelope` / `BatonDoOutput` / `EnvelopeTarget` with operation-discriminated custom Deserialize; `decorate_result` extracted into the operations layer for reuse. Five new operations + shim primitives (`checksum` / `mkdir` / `rmdir` / `rm` / `mv`). One documented divergence on parse-error wire shape (#37). Session tracked in #36.
+- `2026-05-06` — Sessions 8a / 8b / 8c completed (PRs #41 / #43 / #45). 8a closed deferred-test gaps and extracted the shared `annotate_failure` helper across nine operations; 8b renamed `Operation::Move`/`Remove` to `Mv`/`Rm` for variant-↔-module consistency (wire format preserved); 8c wired six decoration flags into `baton-get`. Session 8 tracked in #39; iRODS 5.x pulled out into a separate sink (#40).
+- `2026-05-07` — Session 8 plan re-prioritised post-recon. Reconned five wtsi-npg downstream consumers (partisan, extendo, npg-irods-python, npg_irods, valet, perl-irods-wrap); confirmed `baton-do` is the universal entry point and identified four wire-compat gaps that block partisan/extendo (per-record `file` field, `checksum` args naming, `--server-version` health-check flag, `force`/`verify` threading on `get`). CLI-flag parity (`--unbuffered` etc.) deferred to a future session — not on the partisan critical path. 8d / 8e / 8f re-scoped accordingly. Recon details in #39 update of 2026-05-07.
