@@ -201,9 +201,14 @@ pub struct DataObject {
     )]
     pub checksum: Option<String>,
 
-    /// Inline data-object content, base64-encoded. Populated by
-    /// `baton-get` in inline mode (no `--save`). JSON is text-only, so
-    /// arbitrary bytes need an encoding; base64 matches upstream baton.
+    /// Inline data-object content, **raw UTF-8 text**. Populated by
+    /// `baton-get` in inline mode (no `--save`). Mirrors upstream
+    /// baton's `read.c:116-135` — the bytes are JSON-packed verbatim
+    /// (`json_pack("s", content)`) when they parse as UTF-8.
+    /// Non-UTF-8 input surfaces as `USER_INPUT_PATH_ERR` (-317000)
+    /// rather than getting silently base64-encoded; downstream
+    /// consumers (partisan, extendo) consume this field as plain
+    /// text and would mis-interpret an encoded payload.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub data: Option<String>,
 
@@ -553,8 +558,12 @@ pub enum Operation {
 ///   `baton-metaquery`.
 /// - `verify`: `baton-put`'s client-side hashing flag.
 /// - `save`: `baton-get` save-to-disk mode.
-/// - `raw`: accepted-but-no-op (upstream's raw-bytes get mode;
-///   baton-rs always returns the inline base64 representation).
+/// - `raw`: accepted-but-no-op. Upstream's raw-bytes get mode
+///   was the way to bypass baton's UTF-8 JSON-pack on inline get;
+///   baton-rs always emits raw UTF-8 (#57 Cluster D), and falls
+///   back to `USER_INPUT_PATH_ERR` for non-UTF-8 input the same
+///   way upstream does — there's no separate "raw" code path.
+///   Use `--save` for binary content.
 /// - `recurse` / `force`: shared by `chmod` / `mkdir` / `rmdir`.
 /// - `collection` / `object`: `baton-metaquery` scope flags.
 /// - `single_server`: passed through accepted-but-no-op (baton-rs's put
@@ -1158,11 +1167,15 @@ mod tests {
 
     #[test]
     fn data_object_with_inline_data_round_trip() {
-        // baton-get inline mode emits the bytes as base64 in the `data`
-        // field. "aGVsbG8=" is the base64 of b"hello".
-        let json = r#"{"collection":"/testZone/home/irods","data_object":"foo.txt","data":"aGVsbG8="}"#;
+        // baton-get inline mode emits the bytes as raw UTF-8 text on
+        // the `data` field (mirroring upstream's `json_pack("s",
+        // content)` in `baton/src/read.c:120`). This is a serde
+        // round-trip pin for the wire shape, not a content-encoding
+        // test — the `data` field is just an `Option<String>` from
+        // serde's perspective.
+        let json = r#"{"collection":"/testZone/home/irods","data_object":"foo.txt","data":"hello"}"#;
         let d: DataObject = serde_json::from_str(json).unwrap();
-        assert_eq!(d.data.as_deref(), Some("aGVsbG8="));
+        assert_eq!(d.data.as_deref(), Some("hello"));
         assert_eq!(serde_json::to_string(&d).unwrap(), json);
     }
 

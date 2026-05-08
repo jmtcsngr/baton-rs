@@ -237,7 +237,11 @@ fn binary_dispatches_list_resolves_collection_target_to_data_object() {
 
 #[test]
 fn binary_dispatches_get_inline() {
-    let payload = b"binary get inline";
+    // Inline mode emits raw UTF-8 text on the `data` field (see
+    // upstream `read.c:116-135` and #57 Cluster D). Use ASCII
+    // payload here; the dedicated UTF-8-vs-non-UTF-8 coverage
+    // lives in tests/get.rs.
+    let payload = "binary get inline";
     let local = "/tmp/baton_rs_bin_get_src";
     std::fs::write(local, payload).expect("write");
     let name = unique_name("baton_rs_bin_get");
@@ -245,7 +249,7 @@ fn binary_dispatches_get_inline() {
     iput(local, &remote);
     let _cleanup = IrodsCleanup(remote);
 
-    // arguments.save = false → returns inline base64 in `data`.
+    // arguments.save = false → returns inline raw UTF-8 in `data`.
     let env = BatonDoEnvelope::new_standard(
         Operation::Get,
         data_object_target(TEST_COLL, &name),
@@ -259,11 +263,7 @@ fn binary_dispatches_get_inline() {
     assert!(outputs[0].error.is_none(), "get error: {:?}", outputs[0].error);
     match outputs[0].result.as_ref().expect("result") {
         OperationResult::Single(Target::DataObject(d)) => {
-            use base64::{engine::general_purpose, Engine as _};
-            let bytes = general_purpose::STANDARD
-                .decode(d.data.as_ref().expect("data populated"))
-                .expect("base64 decode");
-            assert_eq!(bytes, payload);
+            assert_eq!(d.data.as_deref(), Some(payload));
         }
         other => panic!("expected Single(DataObject), got {:?}", other),
     }
