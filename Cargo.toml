@@ -6,7 +6,6 @@ license = "GPL-2.0"
 
 [dependencies]
 anyhow             = "1"
-base64             = "0.22"
 clap               = { version = "4", features = ["derive"] }
 md5                = "0.8"
 serde              = { version = "1", features = ["derive"] }
