@@ -825,6 +825,109 @@ fn parse_failure_with_no_newline_terminates_stream() {
 }
 
 #[test]
+fn back_to_back_envelopes_with_crlf_terminators_round_trip() {
+    // Pins Windows-style CRLF (`\r\n`) handling for the streaming
+    // reader. The `\r` between envelopes is JSON whitespace per
+    // RFC 8259, so serde_json skips it; the inclusive
+    // `drain(..=nl_pos)` in `advance_past_newline` would also
+    // strip an adjacent `\r` if it had to fire. This test pins
+    // the happy-path CRLF behaviour so a future refactor can't
+    // silently regress baton-rs on Windows-authored input.
+    let local = "/tmp/baton_rs_bin_crlf_src";
+    std::fs::write(local, b"binary crlf").expect("write");
+    let name = unique_name("baton_rs_bin_crlf");
+    let remote = format!("{}/{}", TEST_COLL, name);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let env1 = BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    );
+    let env2 = BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    );
+    let s1 = serde_json::to_string(&env1).expect("serialise env1");
+    let s2 = serde_json::to_string(&env2).expect("serialise env2");
+    // Join with CRLF and terminate with CRLF — the shape Windows
+    // text editors and PowerShell pipelines emit by default.
+    let input = format!("{s1}\r\n{s2}\r\n");
+    assert!(
+        input.contains("\r\n"),
+        "test input must contain CRLF to exercise the Windows-style path"
+    );
+
+    let output = run_baton_do(&[], &input);
+    assert_success_exit(&output);
+
+    let outputs = parse_outputs(&stdout_str(&output));
+    assert_eq!(
+        outputs.len(),
+        2,
+        "expected 2 output lines for 2 CRLF-separated envelopes"
+    );
+    for (i, o) in outputs.iter().enumerate() {
+        assert!(
+            o.error.is_none(),
+            "record {}: unexpected error: {:?}",
+            i,
+            o.error
+        );
+    }
+}
+
+#[test]
+fn parse_failure_with_crlf_terminator_re_syncs() {
+    // Belt-and-braces for the doc-comment claim: a malformed line
+    // followed by `\r\n` then a valid envelope should still
+    // re-sync. The `drain(..=nl_pos)` in `advance_past_newline`
+    // covers the `\r` immediately preceding the `\n`, so the
+    // residual buffer doesn't start with a stray `\r` that
+    // serde_json would have to skip as whitespace anyway.
+    let local = "/tmp/baton_rs_bin_crlf_recover_src";
+    std::fs::write(local, b"binary crlf recover").expect("write");
+    let name = unique_name("baton_rs_bin_crlf_recover");
+    let remote = format!("{}/{}", TEST_COLL, name);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote);
+
+    let good = serde_json::to_string(&BatonDoEnvelope::new_standard(
+        Operation::List,
+        data_object_target(TEST_COLL, &name),
+        Arguments::default(),
+    ))
+    .expect("serialise good envelope");
+    let input = format!("not-json\r\n{good}\r\n");
+
+    let output = run_baton_do(&[], &input);
+    assert!(
+        !output.status.success(),
+        "parse failure should produce non-zero exit",
+    );
+
+    let lines = parse_value_lines(&stdout_str(&output));
+    assert_eq!(
+        lines.len(),
+        2,
+        "one error line + one list line under CRLF: {:?}",
+        lines
+    );
+    assert!(
+        lines[0].get("error").is_some(),
+        "first line should be a stand-alone error: {}",
+        lines[0],
+    );
+    assert!(
+        lines[1].get("operation").is_some(),
+        "second line should be a normal output envelope: {}",
+        lines[1],
+    );
+}
+
+#[test]
 fn file_arg_reads_envelopes_from_disk() {
     // Same test as the list smoke, but inputs come from --file
     // instead of stdin.
