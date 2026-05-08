@@ -924,4 +924,14 @@ fn list_one_annotated_annotates_error_for_missing_path() {
         "expected USER_FILE_DOES_NOT_EXIST in message, got {:?}",
         err.message
     );
+    // Pin the partisan-compat phrase: `pytest.raises(RodsError,
+    // match="does not exist")` in
+    // `tests/test_irods.py::test_list_collection` and
+    // `test_list_data_object`. `from_irods` adds the descriptive
+    // suffix for known codes. See #57 (Cluster A).
+    assert!(
+        err.message.contains("does not exist"),
+        "expected 'does not exist' phrase in message: {:?}",
+        err.message
+    );
 }
