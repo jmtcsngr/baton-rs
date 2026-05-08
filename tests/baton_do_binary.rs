@@ -188,6 +188,51 @@ fn binary_dispatches_list_with_size() {
     }
 }
 
+#[test]
+fn binary_dispatches_list_resolves_collection_target_to_data_object() {
+    // partisan probes path type via `{"operation": "list", "target":
+    // {"collection": full_path}}` (`partisan/src/partisan/irods.py:1683`)
+    // and pattern-matches on whether the response also carries a
+    // `data_object` field. baton-rs's list arm must auto-resolve via
+    // rcObjStat — sending a Collection-shaped target whose path is
+    // actually a data object should round-trip a DataObject-shaped
+    // result with the path correctly split. See #57 (Issue E).
+    let local = "/tmp/baton_rs_bin_resolve_src";
+    std::fs::write(local, b"binary resolve").expect("write");
+    let name = unique_name("baton_rs_bin_resolve");
+    let remote = format!("{}/{}", TEST_COLL, name);
+    iput(local, &remote);
+    let _cleanup = IrodsCleanup(remote.clone());
+
+    // Collection-shaped target with the FULL data-object path in the
+    // `collection` field — partisan's exact wire shape.
+    let target = Target::Collection(Collection {
+        collection: remote.clone(),
+        avus: None,
+        access: None,
+        timestamps: None,
+        contents: None,
+        error: None,
+    });
+    let env = BatonDoEnvelope::new_standard(Operation::List, target, Arguments::default());
+    let output = run_baton_do(&[], &one_envelope_line(env));
+    assert_success_exit(&output);
+
+    let outputs = parse_outputs(&stdout_str(&output));
+    assert_eq!(outputs.len(), 1);
+    assert!(outputs[0].error.is_none(), "list error: {:?}", outputs[0].error);
+    match outputs[0].result.as_ref().expect("result") {
+        OperationResult::Single(Target::DataObject(d)) => {
+            assert_eq!(d.collection, TEST_COLL);
+            assert_eq!(d.data_object, name);
+        }
+        other => panic!(
+            "expected Single(DataObject) after auto-resolve, got {:?}",
+            other
+        ),
+    }
+}
+
 // --- Operation::Get ------------------------------------------------------
 
 #[test]

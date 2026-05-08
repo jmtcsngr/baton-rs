@@ -120,7 +120,14 @@ pub struct Timestamp {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub modified: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Replica number this timestamp is for (data objects only).
+    /// Wire-renamed to `replicates` (plural) to match upstream
+    /// baton's `JSON_REPLICATE_KEY = "replicates"`
+    /// (`baton/src/json.h:73`) and partisan's
+    /// `Baton.REPLICAS = "replicates"` constant. The Rust field
+    /// keeps the singular name to avoid touching every internal
+    /// call site.
+    #[serde(rename = "replicates", skip_serializing_if = "Option::is_none", default)]
     pub replicate: Option<u32>,
 }
 
@@ -1171,7 +1178,10 @@ mod tests {
 
     #[test]
     fn timestamp_with_replicate_round_trip() {
-        let json = r#"{"created":"2024-01-01T00:00:00","replicate":0}"#;
+        // Wire key is `replicates` (plural) — matches upstream
+        // baton's `JSON_REPLICATE_KEY` and partisan's `Baton.REPLICAS`
+        // constant. Rust field stays `replicate` (singular).
+        let json = r#"{"created":"2024-01-01T00:00:00","replicates":0}"#;
         let t: Timestamp = serde_json::from_str(json).unwrap();
         assert_eq!(t.replicate, Some(0));
         assert_eq!(serde_json::to_string(&t).unwrap(), json);
