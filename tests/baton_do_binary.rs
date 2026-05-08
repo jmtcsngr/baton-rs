@@ -701,11 +701,13 @@ fn no_error_flag_suppresses_nonzero_exit_on_per_input_error() {
 }
 
 #[test]
-fn parse_failure_is_annotated_and_stream_continues() {
-    // Two input lines: one unparseable, one a valid list envelope.
-    // The malformed line emits a stand-alone {"error": ...} and the
-    // good line still gets dispatched. Exit status is non-zero
-    // because we had at least one error.
+fn parse_failure_is_annotated_and_terminates_stream() {
+    // Malformed input on stdin emits a stand-alone {"error": ...}
+    // line and exits non-zero. With the streaming-JSON deserializer
+    // (#60) a parse failure leaves the reader at an unrecoverable
+    // position, so subsequent input — even a valid envelope after a
+    // newline — does NOT get dispatched. Tradeoff documented in
+    // the #60 commit message and tracked for potential re-sync work.
     let local = "/tmp/baton_rs_bin_parsefail_src";
     std::fs::write(local, b"binary parsefail").expect("write");
     let name = unique_name("baton_rs_bin_parsefail");
@@ -727,29 +729,31 @@ fn parse_failure_is_annotated_and_stream_continues() {
     );
 
     let lines = parse_value_lines(&stdout_str(&output));
-    assert_eq!(lines.len(), 2, "one parse-error line + one list line");
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one stand-alone error line; subsequent input is dropped \
+         because the streaming deserializer cannot resync",
+    );
     assert!(
         lines[0].get("error").is_some(),
-        "first line should be a stand-alone error: {}",
+        "the only line should be a stand-alone error: {}",
         lines[0],
-    );
-    // Second line is a fully-formed envelope.
-    assert!(
-        lines[1].get("operation").is_some(),
-        "second line should be a normal output envelope: {}",
-        lines[1],
     );
 }
 
 #[test]
-fn unknown_operation_discriminator_is_annotated_and_stream_continues() {
+fn unknown_operation_discriminator_is_annotated_and_terminates_stream() {
     // Lexically valid JSON with an unknown `operation` value
     // exercises a different deserialise path from `not-json`:
     // the envelope visitor rejects when parsing the Operation
-    // enum, not at JSON-syntax level. Should still surface as a
-    // stand-alone {"error": ...} line and the stream should
-    // continue — same observable behaviour as a syntactic parse
-    // failure.
+    // enum, not at JSON-syntax level. With the streaming-JSON
+    // deserializer (#60) a visitor-level error stops the stream
+    // mid-value (the deserializer doesn't consume the rest of the
+    // bad envelope's tokens), so the reader is left at an
+    // unrecoverable position. Subsequent input — even a valid
+    // envelope after a newline — is dropped. Same observable
+    // outcome as a syntactic parse failure.
     let local = "/tmp/baton_rs_bin_unknownop_src";
     std::fs::write(local, b"binary unknownop").expect("write");
     let name = unique_name("baton_rs_bin_unknownop");
@@ -774,19 +778,16 @@ fn unknown_operation_discriminator_is_annotated_and_stream_continues() {
     let lines = parse_value_lines(&stdout_str(&output));
     assert_eq!(
         lines.len(),
-        2,
-        "one error line + one list line: {:?}",
+        1,
+        "exactly one stand-alone error line; subsequent input is dropped \
+         because the streaming deserializer cannot resync after a \
+         visitor-level error: {:?}",
         lines
     );
     assert!(
         lines[0].get("error").is_some(),
-        "first line should be a stand-alone error: {}",
+        "the only line should be a stand-alone error: {}",
         lines[0],
-    );
-    assert!(
-        lines[1].get("operation").is_some(),
-        "second line should be a normal output envelope: {}",
-        lines[1],
     );
 }
 
