@@ -166,6 +166,28 @@ fn open_input(path: Option<&PathBuf>) -> Result<Box<dyn BufRead>> {
 /// also doesn't send malformed JSON, so this fallback only
 /// affects malformed-without-delimiter input (which can't be
 /// recovered from).
+///
+/// ## Line-ending support
+///
+/// The reader's re-sync is keyed on `\n` (LF). This handles the
+/// two line endings encountered in practice:
+///
+/// - **Unix LF (`\n`):** direct match — the canonical case.
+/// - **Windows CRLF (`\r\n`):** also handled. JSON's grammar
+///   (RFC 8259) treats `\r` as whitespace, so serde_json skips a
+///   leading `\r` between values; on the error path,
+///   `drain(..=nl_pos)` is inclusive and a `\r` immediately
+///   before `\n` sits at `nl_pos - 1`, so it's dropped along
+///   with the `\n`. No special handling required.
+/// - **Pre-OS-X Mac CR-only (`\r`)** is **not** supported. Apple
+///   dropped this convention in 2001; if it ever resurfaces,
+///   adding `\r` as a sync token in `advance_past_newline` is
+///   the smallest possible patch. Adding the support
+///   pre-emptively is over-engineering for an extinct platform.
+///
+/// `tests/baton_do_binary.rs::parse_failure_with_crlf_terminator_re_syncs`
+/// pins the CRLF behaviour explicitly so a future refactor can't
+/// silently regress it.
 struct StreamingEnvelopeReader<R: BufRead> {
     reader: R,
     buf: Vec<u8>,
