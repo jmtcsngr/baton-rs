@@ -520,8 +520,8 @@ fn fetch_timestamps(
 
     let mut timestamps = Vec::with_capacity(rows.len() * 2);
     for row in rows {
-        let created = row.first().cloned().unwrap_or_default();
-        let modified = row.get(1).cloned().unwrap_or_default();
+        let created = row.first().map(|s| format_irods_timestamp(s));
+        let modified = row.get(1).map(|s| format_irods_timestamp(s));
         let replicate = if with_replicate {
             row.get(2)
                 .and_then(|s| s.parse::<u32>().ok())
@@ -530,17 +530,52 @@ fn fetch_timestamps(
         };
 
         timestamps.push(Timestamp {
-            created: Some(created),
+            created,
             modified: None,
             replicate,
         });
         timestamps.push(Timestamp {
             created: None,
-            modified: Some(modified),
+            modified,
             replicate,
         });
     }
     Ok(timestamps)
+}
+
+/// Convert an iRODS catalog timestamp (Unix epoch seconds, typically
+/// zero-padded to 11 chars — e.g. `"01778245757"`) to ISO 8601 / RFC
+/// 3339 in UTC: `"2026-04-21T11:02:37Z"`. Matches upstream baton's
+/// wire shape and what partisan's `dateutil.parser.isoparse`
+/// (`partisan/src/partisan/irods.py:2620`) expects.
+///
+/// Defensive: if the catalog gives us anything that doesn't parse as
+/// `i64`, or a value outside `time::OffsetDateTime`'s representable
+/// range, fall back to echoing the raw string so the caller still
+/// sees *something* recognisable on inspection. This shouldn't fire
+/// for any iRODS-version we run against — the catalog format is
+/// stable since 4.x — but it's cheap insurance against a future
+/// release changing the encoding.
+fn format_irods_timestamp(raw: &str) -> String {
+    let parsed = raw.parse::<i64>().ok().and_then(|secs| {
+        time::OffsetDateTime::from_unix_timestamp(secs).ok()
+    });
+    let dt = match parsed {
+        Some(dt) => dt,
+        None => return raw.to_string(),
+    };
+    // ISO 8601 / RFC 3339 with second precision and 'Z' suffix.
+    // `time` 0.3 with `default-features = false` doesn't include the
+    // formatting feature, so format manually.
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+    )
 }
 
 /// List the direct children of a collection: sub-collections + data
@@ -879,6 +914,45 @@ mod tests {
         };
         let resolved = resolve_target_type(target.clone(), &stat);
         assert_eq!(resolved, target);
+    }
+
+    // --- format_irods_timestamp ------------------------------------------
+
+    #[test]
+    fn format_irods_timestamp_pads_short_components() {
+        // 1970-01-01T00:00:00Z — sanity: the all-zero epoch.
+        assert_eq!(format_irods_timestamp("0"), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn format_irods_timestamp_handles_zero_padded_input() {
+        // iRODS catalog format: 11-char zero-padded Unix seconds.
+        // `1778245757` = 2026-04-08T05:09:17Z. The leading zero in
+        // the input must not break the i64 parse.
+        assert_eq!(
+            format_irods_timestamp("01778245757"),
+            "2026-04-08T05:09:17Z"
+        );
+    }
+
+    #[test]
+    fn format_irods_timestamp_handles_known_iso8601_round_trip() {
+        // 2022-09-09T11:11:03Z — partisan's docstring example.
+        // Unix seconds: 1662721863.
+        assert_eq!(
+            format_irods_timestamp("1662721863"),
+            "2022-09-09T11:11:03Z"
+        );
+    }
+
+    #[test]
+    fn format_irods_timestamp_falls_back_on_unparseable_input() {
+        // Defensive: anything that doesn't parse as i64 echoes
+        // verbatim. This shouldn't fire against current iRODS but
+        // keeps the observable behaviour predictable if the catalog
+        // format ever drifts.
+        assert_eq!(format_irods_timestamp("not-a-number"), "not-a-number");
+        assert_eq!(format_irods_timestamp(""), "");
     }
 
     #[test]
