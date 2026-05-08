@@ -10,7 +10,7 @@
 //! both. Per-input failures get the `error` field annotated and the
 //! stream continues; parse / IO errors stay fail-fast.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -20,6 +20,7 @@ use baton_rs::{
     parse_connect_time, ReconnectingSession, RodsConnection, DEFAULT_CONNECT_TIME_SECS,
 };
 use clap::Parser;
+use serde_json::Deserializer;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -97,18 +98,16 @@ fn main() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    for line in stdin.lock().lines() {
-        let line = line.context("reading stdin")?;
-        if line.trim().is_empty() {
-            continue;
-        }
+    // Stream-parse JSON values rather than reading line-by-line; see
+    // #60 for rationale.
+    let reader = stdin.lock();
+    let stream = Deserializer::from_reader(reader).into_iter::<MetamodInput>();
+    for result in stream {
+        let input = result.context("parsing input as a MetamodInput")?;
 
         // Reconnect at record boundaries when the wall-clock watchdog
         // says it's time. Reconnect failures are fail-fast.
         let conn = session.maybe_reconnect().context("reconnecting to iRODS")?;
-
-        let input: MetamodInput = serde_json::from_str(&line)
-            .context("parsing input line as a MetamodInput")?;
 
         // iRODS-side failures per input are annotated in-band and the
         // stream keeps going. Parse / IO errors above are still

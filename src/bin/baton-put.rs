@@ -42,7 +42,7 @@
 //! observable behaviour would be testing iRODS, not baton-rs.
 //! `tests/get.rs` keeps a defensive canary on the read side.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -52,6 +52,7 @@ use baton_rs::{
     DEFAULT_CONNECT_TIME_SECS,
 };
 use clap::Parser;
+use serde_json::Deserializer;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -149,20 +150,18 @@ fn main() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    for line in stdin.lock().lines() {
-        let line = line.context("reading stdin")?;
-        if line.trim().is_empty() {
-            continue;
-        }
+    // Stream-parse JSON values rather than reading line-by-line; see
+    // #60 for rationale.
+    let reader = stdin.lock();
+    let stream = Deserializer::from_reader(reader).into_iter::<Target>();
+    for result in stream {
+        let target = result.context("parsing input as a Target")?;
 
         // Reconnect at record boundaries when the wall-clock watchdog
         // says it's time. Reconnect failures are fail-fast — there's
         // no useful in-band annotation when the connection itself is
         // broken.
         let conn = session.maybe_reconnect().context("reconnecting to iRODS")?;
-
-        let target: Target =
-            serde_json::from_str(&line).context("parsing input line as a Target")?;
 
         // iRODS-side failures per input are annotated in-band and the
         // stream keeps going. Parse / IO errors above are still

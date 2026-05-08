@@ -704,8 +704,9 @@ fn no_error_flag_suppresses_nonzero_exit_on_per_input_error() {
 fn parse_failure_is_annotated_and_stream_continues() {
     // Two input lines: one unparseable, one a valid list envelope.
     // The malformed line emits a stand-alone {"error": ...} and the
-    // good line still gets dispatched. Exit status is non-zero
-    // because we had at least one error.
+    // good line still gets dispatched — the hybrid streaming reader
+    // re-syncs past the next `\n` on parse error (#60 / #61). Exit
+    // status is non-zero because we had at least one error.
     let local = "/tmp/baton_rs_bin_parsefail_src";
     std::fs::write(local, b"binary parsefail").expect("write");
     let name = unique_name("baton_rs_bin_parsefail");
@@ -733,7 +734,6 @@ fn parse_failure_is_annotated_and_stream_continues() {
         "first line should be a stand-alone error: {}",
         lines[0],
     );
-    // Second line is a fully-formed envelope.
     assert!(
         lines[1].get("operation").is_some(),
         "second line should be a normal output envelope: {}",
@@ -746,10 +746,9 @@ fn unknown_operation_discriminator_is_annotated_and_stream_continues() {
     // Lexically valid JSON with an unknown `operation` value
     // exercises a different deserialise path from `not-json`:
     // the envelope visitor rejects when parsing the Operation
-    // enum, not at JSON-syntax level. Should still surface as a
-    // stand-alone {"error": ...} line and the stream should
-    // continue — same observable behaviour as a syntactic parse
-    // failure.
+    // enum, not at JSON-syntax level. The hybrid streaming reader
+    // re-syncs past the next `\n` after either kind of error, so
+    // a follow-up envelope on the next line still gets dispatched.
     let local = "/tmp/baton_rs_bin_unknownop_src";
     std::fs::write(local, b"binary unknownop").expect("write");
     let name = unique_name("baton_rs_bin_unknownop");
@@ -787,6 +786,41 @@ fn unknown_operation_discriminator_is_annotated_and_stream_continues() {
         lines[1].get("operation").is_some(),
         "second line should be a normal output envelope: {}",
         lines[1],
+    );
+}
+
+#[test]
+fn parse_failure_with_no_newline_terminates_stream() {
+    // The hybrid streaming reader (#60 / #61) re-syncs at `\n`
+    // boundaries on parse error. If the malformed input has no `\n`
+    // ahead of EOF, there's nothing to re-sync to — the stream
+    // terminates after surfacing the error. Pins the trade-off
+    // explicitly: partisan / extendo style (no newlines) is
+    // recoverable only as long as the input is well-formed.
+    let input = "not-json";
+    assert!(
+        !input.contains('\n'),
+        "test input must contain no newlines to exercise the no-resync path"
+    );
+
+    let output = run_baton_do(&[], input);
+    assert!(
+        !output.status.success(),
+        "parse failure should produce non-zero exit",
+    );
+
+    let lines = parse_value_lines(&stdout_str(&output));
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one error line; without a `\\n` to resync to, the \
+         stream terminates after the first parse failure: {:?}",
+        lines
+    );
+    assert!(
+        lines[0].get("error").is_some(),
+        "the only line should be a stand-alone error: {}",
+        lines[0],
     );
 }
 
@@ -1152,6 +1186,57 @@ fn version_flag_with_strict_compat_empty_value_falls_through_to_crate_version() 
     assert!(output.status.success());
     let line = String::from_utf8(output.stdout).expect("stdout utf-8");
     assert_eq!(line.trim_end(), env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn stdin_accepts_back_to_back_json_with_no_whitespace_between_envelopes() {
+    // partisan writes envelopes via `subprocess.stdin.write()` without
+    // trailing newlines (`partisan/src/partisan/irods.py:743`); a
+    // line-delimited reader would block waiting for `\n` and partisan's
+    // `_send` would deadlock on its `stdout.readline()` (#60). Pin
+    // that the streaming deserializer parses back-to-back JSON values
+    // with zero inter-value whitespace, mimicking partisan's exact
+    // wire shape.
+    let coll = TEST_COLL;
+    let env1 = BatonDoEnvelope::new_standard(
+        Operation::List,
+        collection_target(coll),
+        Arguments::default(),
+    );
+    let env2 = BatonDoEnvelope::new_standard(
+        Operation::List,
+        collection_target(coll),
+        Arguments::default(),
+    );
+    // Concatenate the JSON bodies with NO separator at all — no
+    // newline, no whitespace. Upstream baton-do parses this via
+    // jansson's `json_loadf`; baton-rs needs to match.
+    let s1 = serde_json::to_string(&env1).expect("serialise env1");
+    let s2 = serde_json::to_string(&env2).expect("serialise env2");
+    let input = format!("{}{}", s1, s2);
+    assert!(
+        !input.contains('\n'),
+        "test input must contain no newlines to exercise the partisan-style wire shape"
+    );
+
+    let output = run_baton_do(&[], &input);
+    assert_success_exit(&output);
+
+    let outputs = parse_outputs(&stdout_str(&output));
+    assert_eq!(
+        outputs.len(),
+        2,
+        "expected 2 output lines for 2 input envelopes; got {}",
+        outputs.len()
+    );
+    for (i, o) in outputs.iter().enumerate() {
+        assert!(
+            o.error.is_none(),
+            "record {}: unexpected error: {:?}",
+            i,
+            o.error
+        );
+    }
 }
 
 // --- Boundary-input coverage ---------------------------------------------
