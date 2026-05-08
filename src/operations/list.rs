@@ -927,11 +927,11 @@ mod tests {
     #[test]
     fn format_irods_timestamp_handles_zero_padded_input() {
         // iRODS catalog format: 11-char zero-padded Unix seconds.
-        // `1778245757` = 2026-04-08T05:09:17Z. The leading zero in
+        // `1778245757` = 2026-05-08T13:09:17Z. The leading zero in
         // the input must not break the i64 parse.
         assert_eq!(
             format_irods_timestamp("01778245757"),
-            "2026-04-08T05:09:17Z"
+            "2026-05-08T13:09:17Z"
         );
     }
 
