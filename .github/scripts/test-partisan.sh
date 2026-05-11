@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -exuo pipefail
 
 # Build baton-rs and run partisan's pytest suite against it. Mirrors
 # `docker/build.sh` for the Rust + iRODS-client bootstrap, then
