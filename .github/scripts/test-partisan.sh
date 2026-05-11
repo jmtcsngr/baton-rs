@@ -137,9 +137,8 @@ pip install --quiet -r /tmp/partisan/test-requirements.txt
 pip install --quiet pytest-timeout
 pip install --quiet /tmp/partisan
 
-# `--timeout=60` fires pytest-timeout on any hang (a few partisan
-# tests do real iRODS round-trips; 30 s is too tight). `signal`
-# kills the whole process group so a hung baton-do child doesn't
-# wedge the run. `-v --tb=short` keeps the CI log readable.
+# `--timeout=10` fires pytest-timeout on any hang. `signal` kills
+# the whole process group so a hung baton-do child doesn't wedge
+# the run. `-v --tb=short` keeps the CI log readable.
 cd /tmp/partisan
-pytest --timeout=60 --timeout-method=signal -v --tb=short
+pytest --timeout=30 --timeout-method=signal -v --tb=short
