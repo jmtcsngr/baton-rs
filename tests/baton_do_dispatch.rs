@@ -145,7 +145,7 @@ fn dispatch_routes_metaquery_with_operator_through_to_multiple_results() {
     let mut input = MetaqueryInput::default();
     input.avus = vec![AvuQuery {
         attribute: attr.to_string(),
-        value: value.clone(),
+        value: value.clone().into(),
         units: None,
         operator: Operator::Equals,
     }];
@@ -202,7 +202,7 @@ fn dispatch_metaquery_decorates_results_with_size_when_requested() {
     let mut input = MetaqueryInput::default();
     input.avus = vec![AvuQuery {
         attribute: attr.to_string(),
-        value,
+        value: value.into(),
         units: None,
         operator: Operator::Equals,
     }];
