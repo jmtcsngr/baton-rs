@@ -1,5 +1,19 @@
 name: "Partisan compatibility tests"
-on: [push, pull_request]
+
+# Trigger budget: this workflow builds CPython from source on cold
+# cache and runs partisan's full pytest suite, so we don't want it
+# firing on every feature-branch push. Run on:
+#   - any pull_request (gate before merge into main)
+#   - push to main (post-merge validation)
+#   - push to branches matching `**compat_partisan**` (opt-in name
+#     for branches actively working on partisan-compat — push there
+#     to iterate without opening a PR)
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "**compat_partisan**"
 
 # End-to-end run of partisan's pytest suite against baton-rs binaries.
 # Partisan is the primary downstream consumer of the baton-do wire
