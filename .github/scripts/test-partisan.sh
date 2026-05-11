@@ -16,14 +16,15 @@ set -euo pipefail
 # script + `.partisan-pin`. First cold run builds Python from source
 # (~5 min); subsequent warm runs skip straight to the test step.
 #
-# Partisan commit comes from `.partisan-pin` at the repo root —
-# easier to bump and lets the cache key invalidate automatically
-# when we move forward. Recon context lives in the
-# `project_partisan_pin.md` memory and in #57 / #49.
+# Partisan commit comes from `.github/scripts/partisan-pin` —
+# easier to bump than a constant here, and lets the workflow's
+# cache key invalidate automatically when we move forward. Recon
+# context lives in the `project_partisan_pin.md` memory and in
+# #57 / #49.
 
 PYTHON_VERSION="3.12"
 PYENV_RELEASE_VERSION="2.4.16"
-PARTISAN_PIN_FILE="${PARTISAN_PIN_FILE:-.partisan-pin}"
+PARTISAN_PIN_FILE="${PARTISAN_PIN_FILE:-.github/scripts/partisan-pin}"
 PARTISAN_REPO="https://github.com/wtsi-npg/partisan.git"
 
 # Parse the pin file: skip blank / comment lines, take the first
