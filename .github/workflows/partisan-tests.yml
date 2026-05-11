@@ -28,11 +28,16 @@ on:
 #
 # Matrix-shaped for the same 4.2.7 / 4.3.4 / 4.3.5 trio as
 # `unit-tests.yml`, but only 4.3.5 is enabled today. Uncomment the
-# other entries once partisan is stable on 4.3.5. The job is
-# informational (`continue-on-error: true`) — cluster E from #57
-# still fails `test_verify_checksum_good` and we don't want that
-# blocking unrelated PRs. Flip to gating once `test_irods.py` is
-# fully green.
+# other entries once partisan is stable on 4.3.5.
+#
+# The job is intentionally **informational long-term**
+# (`continue-on-error: true`): partisan is a downstream consumer
+# pinned to a single SHA, so its tests carry information about
+# wire-compat regressions but shouldn't gate merges on the
+# baton-rs side — schema drift, partisan-pin bumps, or upstream
+# iRODS quirks would all surface here as "fails" the baton-rs
+# author can't fix in their own PR. Treat the partisan job as a
+# signal to investigate, not a merge blocker.
 #
 # Tracks #39 (Session 8), #57 (partisan recon).
 jobs:
