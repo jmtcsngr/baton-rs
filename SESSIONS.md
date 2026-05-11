@@ -483,39 +483,58 @@ Implementation-detail choices:
 
 ### Session 8 — Polish and compatibility
 
-**Status:** in progress (8a / 8b / 8c merged; 8d planned post-recon).
+**Status:** completed on 2026-05-11. Tracked in #39 (closed).
 
-**Goal (post-recon):** Close the wire-compat gaps that block downstream consumers, then validate end-to-end against the partisan (Python) and extendo (Go) test suites. Originally framed around CLI-flag parity (`--unbuffered` / `--unsafe` / etc.); after a recon pass against five wtsi-npg repos (see #39 update on 2026-05-07) those flags were re-classified as not partisan/extendo-blocking and pushed to a future session. iRODS 5.x compatibility moved to its own tracking issue (#40).
+**Goal (post-recon):** Close the wire-compat gaps that block downstream consumers, then validate end-to-end against the partisan (Python) and extendo (Go) test suites. Originally framed around CLI-flag parity (`--unbuffered` / `--unsafe` / etc.); after a recon pass against five wtsi-npg repos (see #39 update on 2026-05-07) those flags were re-classified as not partisan/extendo-blocking and pushed indefinitely. iRODS 5.x compatibility moved to its own tracking issue (#40).
 
 **Completed sub-sessions:**
 
 - **8a — housekeeping & deferred-test closure** (PR #41, merged 2026-05-06). `Annotatable` trait + `annotate_failure` helper collapse nine `*_one_annotated` functions across the operations layer; boundary-input tests (spaces / unicode / deep nesting); mixed-success-and-iRODS-error stream test; end-to-end `--connect-time` recycle test on `baton-do`. The "drop unused `tracing` direct dep" carry-forward from Session 6 dissolved — `tracing::warn!` / `debug!` are genuinely used in `baton-do.rs` since 7b.
 - **8b — `Operation::Move` → `Mv`, `Remove` → `Rm` rename** (PR #43, merged 2026-05-06). Restores the variant-↔-module pairing across all 11 operations (`Mv` ↔ `mv`, `Rm` ↔ `rm`, matching the `Mkdir`/`Rmdir` abbreviation pattern). Wire format preserved via explicit `#[serde(rename = "move"/"remove")]` attributes (the original `#[serde(rename_all = "lowercase")]` would otherwise have changed the wire form).
 - **8c — `baton-get` decoration parity** (PR #45, merged 2026-05-06). Six decoration flags (`--avu` / `--acl` / `--size` / `--checksum` / `--replicate` / `--timestamp`) wired into `baton-get` via the shared `decorate_result` helper extracted in 7b. Skip-on-error guard added to `decorate_result` so an errored get isn't masked by a follow-up stat. New `Target::has_error()` accessor.
+- **8d — partisan/extendo wire-compat gaps** (PRs #51 / #53 / #55 / #56, merged 2026-05-07, tracked in #49 — closed 2026-05-08). All four numbered gaps from #49 shipped:
+  - `checksum` op args naming → `{checksum, verify, force}` (settled via upstream-source check; `{calculate, recalculate}` hypothesis was wrong on both sides).
+  - Per-record `file` field on `DataObject` (#30 closed). Implements `json_to_local_path` priority from `baton/src/json.c:1211-1244`.
+  - `baton-do --server-version` for partisan's health check.
+  - `force` / `verify` threaded through the `get` op end-to-end.
+- **8f — partisan test-suite validation.** Partisan workflow shipped (#72, merged 2026-05-11); informational long-term per the policy decision below. Initial partisan recon (#57) surfaced 15 failing tests across five clusters (A: error prose, B: empty checksum emission, C: ISO 8601 timestamps, D: raw UTF-8 data, E: verify-good catalog digest). All clusters resolved across PRs #67, #68, #69, #70, #71, #74, #75. Final state: `test_irods.py` 125/125 passing in devcontainer; partisan CI workflow runs `test_irods.py` on every PR + push-to-main + push-to-`**compat_partisan**` branches. Extendo follow-up filed as #76 (Go consumer, Ginkgo suite); workflow drafted on `feat/extendo-ci`.
 
-**Pending sub-sessions (post-recon plan, see #39):**
+**Items spun out post-close:**
 
-- **8d — wire-compat gaps for partisan/extendo:** per-record `file` field on `DataObject` (#30), `checksum` operation args naming (`{calculate, recalculate, verify}` vs `{force, verify}` — needs upstream-source check), `baton-do --server-version` for health checks, `force` / `verify` threaded through the `get` op.
-- **8e — cross-zone metaquery scoping** + **accumulate-instead-of-break for chmod** (#34). Lower partisan-blocking urgency; optionally bundled with 8d.
-- **8f — partisan / extendo test-suite validation.** Run their suites against baton-rs binaries, surface anything missed.
+- **Cross-zone metaquery scoping** → #77 (originally 8e). v2 item; current code silently ignores `zone`. Recon documented on the issue.
+- **Chmod per-grant error accumulation** → #34 (originally 8e). Decision-pending — opt-in flag vs default change, needs design call before code lands.
+- **Extendo compatibility workflow** → #76. Workflow drafted on `feat/extendo-ci`. Extendo is Go (not Erlang/Elixir as the original 8f framing suggested); workflow uses Go 1.24.1 + Ginkgo, runs the full 4.2.7 / 4.3.4 / 4.3.5 iRODS trio (Go's static tarballs work on Ubuntu 16.04 where the partisan workflow's Python 3.12 build doesn't).
+
+**Verification list satisfied:**
+
+- [x] `cargo build` clean in devcontainer at every commit.
+- [x] All existing integration tests still pass.
+- [x] CI matrix (4.2.7 / 4.3.4 / 4.3.5) green at every push (unit-tests).
+- [x] Each new flag / feature has integration coverage.
+- [x] Each gap-analysis question has a settled answer with upstream-source citation (resolved via #49 / #57 recon comments).
+- [x] Partisan test-suite passes against baton-rs binaries (8f gate, devcontainer-validated 2026-05-11).
 
 **Deferred / known gaps:**
 
-- **CLI-flag parity** (`--unbuffered` / `--unsafe` / `--no-clobber` / `--file` / `--buffer-size`) — re-classified post-recon as not partisan/extendo-blocking; deferred to a future session.
-- **iRODS 5.x compatibility** — separate tracking issue (#40).
-- **Pluggable `BATON_HASH_SCHEME`** (#27, #31) — stays deferred unless 8f surfaces a partisan fixture that needs SHA2.
+- **CLI-flag parity** (`--unbuffered` / `--unsafe` / `--no-clobber` / `--file` / `--buffer-size`) — re-classified post-recon as not partisan/extendo-blocking; deferred indefinitely (no driver from downstream consumers).
+- **iRODS 5.x compatibility** — #40.
+- **Pluggable `BATON_HASH_SCHEME`** (#27, #31) — no partisan-side driver surfaced; deferred.
+- **Partisan chunked-read MD5 mystery** — #66; appears to be a partisan-side bug. Kept open as upstream-baton feedback channel.
 
-**Decisions made (so far):**
+**Decisions made:**
 
 - **`Operation::Move`/`Remove` rename direction**: rename the Rust variants (option A) rather than the modules (option B). Keeps `r#move` / `r#remove` raw-identifier ugliness out of the codebase; wire format stays the same via per-variant `#[serde(rename)]`.
 - **`baton-get` decoration scope**: all six DecorationOptions fields rather than only the four (`--avu` / `--acl` / `--size` / `--timestamp`) listed in #39. Matches `baton-list` parity at no extra implementation cost.
 - **`tracing` direct dep stays** — used in `baton-do.rs` since 7b. The Session 6 carry-forward was stale.
 - **Recon-driven re-prioritisation** (2026-05-07): partisan and extendo both target only `baton-do`, which means the CLI-flag-parity work is not on the partisan critical path. Real partisan-blocking gaps are at the wire-format level (see #39 update).
+- **Partisan workflow stays informational long-term** (`continue-on-error: true`). Partisan is a downstream consumer pinned to a single SHA — schema drift, pin bumps, or upstream iRODS quirks would otherwise fail PRs that have nothing to do with the failure. Same policy adopted for the extendo workflow on `feat/extendo-ci`. Treat partisan / extendo CI as a signal to investigate, not a merge blocker.
+- **iRODS 4.2.7 excluded from the partisan matrix only.** Ubuntu 16.04 base image ships OpenSSL 1.0.2; Python 3.12's `_ssl` needs ≥ 1.1.1, so pyenv's CPython build fails. `unit-tests.yml` still covers 4.2.7 directly against baton-rs (no Python involved on that path). Extendo CI keeps 4.2.7 — Go's static tarballs aren't constrained by OpenSSL version.
+- **Synthetic error line on parse failure stays** (#37 closed 2026-05-11). The wire-shape question from #37 was resolved by the existing synthetic-error emission landed in Session 7. A separate deadlock symptom in the recovery path (blocking `read_until(b'\n', ...)` on partisan-style envelopes without newlines) was fixed by #79 — non-blocking inline recovery in `next_envelope`.
 
-**Open questions (carried into 8d):**
+**Settled questions (originally carried into 8d):**
 
-- **`checksum` args naming**: does upstream baton accept both `{calculate, recalculate}` and `{force}` as aliases, or do partisan and extendo each tolerate the other's spelling? Needs upstream-source check before settling baton-rs's Arguments shape.
-- **`force` semantics on `get`**: partisan sends `{force, save, verify, redirect}` for `--save`-style get; what does upstream baton do with `force` on a get? (Likely "overwrite local file if it exists".)
+- **`checksum` args naming**: upstream-source check in #49 confirmed `{checksum, verify, force}` is the actual wire shape; both partisan and extendo emit it consistently. baton-rs's `Arguments` was renamed to match before any sub-PR shipped.
+- **`force` semantics on `get`**: `force` is upstream's "overwrite local file if it exists" — accepted on the wire for parity but no-op in baton-rs because `File::create` truncates unconditionally (later refined to a temp-then-rename pattern in #73 for the empty-file-on-failed-get bug #65).
 
 ---
 
@@ -554,3 +573,6 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
 - `2026-05-06` — Session 7 completed on branch `feat/session-7-baton-do` (18 commits across 7a / 7b / 7c). `baton-do` wired with the full clap surface; 11-arm dispatcher in `operations::baton_do`; `BatonDoEnvelope` / `BatonDoOutput` / `EnvelopeTarget` with operation-discriminated custom Deserialize; `decorate_result` extracted into the operations layer for reuse. Five new operations + shim primitives (`checksum` / `mkdir` / `rmdir` / `rm` / `mv`). One documented divergence on parse-error wire shape (#37). Session tracked in #36.
 - `2026-05-06` — Sessions 8a / 8b / 8c completed (PRs #41 / #43 / #45). 8a closed deferred-test gaps and extracted the shared `annotate_failure` helper across nine operations; 8b renamed `Operation::Move`/`Remove` to `Mv`/`Rm` for variant-↔-module consistency (wire format preserved); 8c wired six decoration flags into `baton-get`. Session 8 tracked in #39; iRODS 5.x pulled out into a separate sink (#40).
 - `2026-05-07` — Session 8 plan re-prioritised post-recon. Reconned five wtsi-npg downstream consumers (partisan, extendo, npg-irods-python, npg_irods, valet, perl-irods-wrap); confirmed `baton-do` is the universal entry point and identified four wire-compat gaps that block partisan/extendo (per-record `file` field, `checksum` args naming, `--server-version` health-check flag, `force`/`verify` threading on `get`). CLI-flag parity (`--unbuffered` etc.) deferred to a future session — not on the partisan critical path. 8d / 8e / 8f re-scoped accordingly. Recon details in #39 update of 2026-05-07.
+- `2026-05-07` / `2026-05-08` — Session 8d completed (PRs #51 / #53 / #55 / #56). All four wire-compat gaps from #49 shipped; #49 closed as superseded. Streaming JSON reader hardened for partisan's no-newline envelopes (#62).
+- `2026-05-08` — Partisan test recon (#57) staged in devcontainer. 15 failing tests → cluster table (A: error prose, B: empty-checksum emission, B': JSON null serialisation, C: ISO 8601 timestamps, D: raw UTF-8 data, E: verify-good catalog digest). Clusters A–D fixed across PRs #67 (list checksum emission), #68 (JSON null for empty checksum), #69 (descriptive error prose for partisan-regex matches), #70 (raw UTF-8 data field replacing base64), #71 (ISO 8601 → epoch-seconds in metaquery SQL). `base64` dep dropped. `time` dep added for ISO 8601 conversion (`default-features = false`). `description` lookup table added to `BatonError::from_irods` for partisan-regex compatibility.
+- `2026-05-11` — Session 8e/8f closed out. Cluster E fixed (#74 — shim allows NULL chksum in VERIFY mode + Rust falls back to catalog read so verify-good returns a non-empty digest); AvuValue IN-array deserialisation fixed (#75 — untagged enum, accepts both string and array shapes from partisan's `BatonJSONEncoder`); `--save` empty-file-on-failed-get bug fixed (#73, closes #65 — temp-then-rename via `tempfile` crate); baton-do parse-error deadlock fixed (#79 — non-blocking recovery, closes #37). Partisan CI workflow shipped (#72, follow-up policy + matrix in #78). Session 8 (#39) closed; remaining 8e items spun out into individual trackers (#34 chmod accumulation, #77 cross-zone metaquery scoping). Extendo compat-workflow follow-up filed as #76 and drafted on `feat/extendo-ci`.
