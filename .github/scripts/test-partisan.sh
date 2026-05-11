@@ -124,8 +124,18 @@ python -m venv /tmp/partisan-venv
 # shellcheck source=/dev/null
 . /tmp/partisan-venv/bin/activate
 pip install --quiet --upgrade pip
-pip install --quiet -e '/tmp/partisan[test]'
+
+# Install partisan the same way its own `Dockerfile.dev` does:
+# pinned `requirements.txt` + `test-requirements.txt` first, then
+# the package itself. The pyproject.toml `[test]` extras carry
+# unpinned ranges and miss `click` / `setuptools_git_versioning`,
+# which leads to different resolved versions and a different test
+# outcome than the devcontainer setup. pytest-timeout isn't in
+# partisan's deps, so we layer it on top.
+pip install --quiet -r /tmp/partisan/requirements.txt
+pip install --quiet -r /tmp/partisan/test-requirements.txt
 pip install --quiet pytest-timeout
+pip install --quiet /tmp/partisan
 
 # `--timeout=60` fires pytest-timeout on any hang (a few partisan
 # tests do real iRODS round-trips; 30 s is too tight). `signal`
