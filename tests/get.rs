@@ -775,14 +775,11 @@ fn get_save_failure_leaves_no_local_artefact() {
     std::fs::create_dir_all(download_dir).expect("create download dir");
     let basename = "baton_rs_get_save_no_partial_missing_obj";
     let final_path = PathBuf::from(format!("{}/{}", download_dir, basename));
-    let partial_path =
-        PathBuf::from(format!("{}/.{}.partial", download_dir, basename));
-    // Pre-clean from any prior aborted run so the assertions below
-    // measure the current invocation's behaviour.
+    // tempfile uses a random middle component between prefix and
+    // suffix, so we can't pre-compute the partial path. The
+    // assertion below globs the directory for leftovers instead.
     let _ = std::fs::remove_file(&final_path);
-    let _ = std::fs::remove_file(&partial_path);
     let _final_cleanup = LocalCleanup(final_path.clone());
-    let _partial_cleanup = LocalCleanup(partial_path.clone());
 
     let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
     conn.login_from_auth_file().expect("login_from_auth_file");
@@ -817,10 +814,25 @@ fn get_save_failure_leaves_no_local_artefact() {
         "#65 regression: failed --save left a final-name file at {}",
         final_path.display()
     );
+
+    // Glob the download directory for any leftover temp files
+    // matching the `.<basename>.<random>.partial` shape NamedTempFile
+    // creates. The directory may legitimately hold other unrelated
+    // files from concurrent tests, so we filter by prefix+suffix.
+    let leftover: Vec<_> = std::fs::read_dir(download_dir)
+        .expect("read_dir download_dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with(&format!(".{}.", basename)) && n.ends_with(".partial")
+        })
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
     assert!(
-        !partial_path.exists(),
-        "#65 regression: failed --save left a temp artefact at {}",
-        partial_path.display()
+        leftover.is_empty(),
+        "#65 regression: failed --save left temp artefact(s) {:?} in {}",
+        leftover,
+        download_dir,
     );
 }
 

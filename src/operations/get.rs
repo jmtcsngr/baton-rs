@@ -30,75 +30,14 @@
 //! therefore leaves no artefact at the destination — neither an
 //! empty zero-byte file nor a partial download. See #65.
 
-use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use tempfile::NamedTempFile;
 
 use crate::connection::{OpenMode, RodsConnection};
 use crate::error::BatonError;
 use crate::types::Target;
-
-/// RAII helper for the `--save` path's "write to a temp sibling,
-/// rename on success" pattern. While armed, dropping the guard
-/// removes the temp file — so an early-return via `?` (open failed,
-/// stream failed, fsync failed, verify failed, …) leaves no
-/// artefact at either the temp or the final path. Caller disarms
-/// via [`PendingWrite::promote_to`] once the bytes are fully on
-/// disk and any verify has passed. See #65 for the rationale.
-struct PendingWrite {
-    temp: PathBuf,
-    armed: bool,
-}
-
-impl PendingWrite {
-    fn new(temp: PathBuf) -> Self {
-        Self { temp, armed: true }
-    }
-
-    /// Atomically rename the temp file to `final_path`. On success
-    /// the guard is disarmed (the temp no longer exists, so Drop
-    /// would error harmlessly anyway, but clearing `armed` keeps
-    /// the intent explicit).
-    fn promote_to(mut self, final_path: &Path) -> Result<(), BatonError> {
-        fs::rename(&self.temp, final_path).map_err(|e| BatonError {
-            code: -1,
-            message: format!(
-                "renaming {} → {}: {}",
-                self.temp.display(),
-                final_path.display(),
-                e
-            ),
-        })?;
-        self.armed = false;
-        Ok(())
-    }
-}
-
-impl Drop for PendingWrite {
-    fn drop(&mut self) {
-        if self.armed {
-            // Best-effort cleanup — ignore errors because we're
-            // already on an error path and the user gets a clearer
-            // signal from the original `?`-propagated `BatonError`
-            // than from a follow-up "couldn't delete temp" message.
-            let _ = fs::remove_file(&self.temp);
-        }
-    }
-}
-
-/// Build the hidden-sibling temp path for a `--save` destination.
-/// `/dir/file` → `/dir/.file.partial`. Keeps the temp on the same
-/// filesystem as the final path so the eventual `fs::rename` is
-/// atomic (POSIX guarantees same-fs rename is a single inode
-/// flip).
-fn temp_path_for(local_path: &Path) -> PathBuf {
-    let parent = local_path.parent().unwrap_or_else(|| Path::new("."));
-    let basename = local_path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    parent.join(format!(".{}.partial", basename))
-}
 
 /// Caller-controlled flags for [`get_one`].
 #[derive(Debug, Default, Clone, Copy)]
@@ -181,12 +120,13 @@ pub fn get_one(
     };
 
     // The `--save` path uses a temp-then-rename pattern: write to a
-    // hidden sibling (`<dir>/.<basename>.partial`), and only promote
-    // it to the final name once the read, fsync, *and* verify all
-    // pass. Any early return between here and the final rename leaves
-    // no artefact at the destination (see #65). The guard lives at
-    // function scope so it spans the verify step below.
-    let mut pending: Option<(PendingWrite, PathBuf)> = None;
+    // hidden sibling, and only promote it to the final name once the
+    // read, fsync, *and* verify all pass. Any early return between
+    // here and the final rename leaves no artefact at the destination
+    // (see #65). `NamedTempFile` removes the temp on Drop unless
+    // `persist()` is called — so the cleanup guarantee spans the
+    // verify step below for free.
+    let mut pending: Option<(NamedTempFile, PathBuf)> = None;
 
     if opts.save {
         // Path priority mirrors `json_to_local_path` in
@@ -203,33 +143,35 @@ pub fn get_one(
         let mut local_path = PathBuf::from(directory);
         local_path.push(basename);
 
-        let temp_path = temp_path_for(&local_path);
-        let mut file = File::create(&temp_path).map_err(|e| BatonError {
-            code: -1,
-            message: format!("could not create local file {}: {}", local_path.display(), e),
-        })?;
-        // Arm the cleanup guard as soon as the temp exists on disk.
-        let guard = PendingWrite::new(temp_path);
+        // `tempfile_in(directory)` lands the temp on the same
+        // filesystem as the destination — required for the eventual
+        // `persist()` to be an atomic POSIX rename. The
+        // `.<basename>.…partial` naming keeps a partial download
+        // identifiable on disk if something panics outside Drop
+        // semantics (e.g. SIGKILL).
+        let mut temp = tempfile::Builder::new()
+            .prefix(&format!(".{}.", basename))
+            .suffix(".partial")
+            .tempfile_in(directory)
+            .map_err(|e| BatonError {
+                code: -1,
+                message: format!("could not create local file {}: {}", local_path.display(), e),
+            })?;
 
         let handle = conn.open_data_object(&path, OpenMode::Read)?;
-        let result = stream_to_writer(conn, handle, &mut file, hash.as_mut());
+        let result = stream_to_writer(conn, handle, temp.as_file_mut(), hash.as_mut());
         let _ = conn.close_data_object(handle);
         result?;
 
         // Ensure bytes hit the OS before we declare success. Without
         // this, a concurrent reader (e.g. a downstream pipeline) could
         // see a short file when --save returns.
-        file.sync_all().map_err(|e| BatonError {
+        temp.as_file().sync_all().map_err(|e| BatonError {
             code: -1,
             message: format!("flushing local file {}: {}", local_path.display(), e),
         })?;
-        // Drop the file handle before the rename so the kernel
-        // doesn't have an open fd against the old inode at the
-        // moment of the inode flip — irrelevant on Linux, polite on
-        // other Unices.
-        drop(file);
 
-        pending = Some((guard, local_path));
+        pending = Some((temp, local_path));
     } else {
         let handle = conn.open_data_object(&path, OpenMode::Read)?;
         let read_result = read_to_end(conn, handle);
@@ -290,10 +232,16 @@ pub fn get_one(
 
     // Final step on the save path: atomically promote the temp file
     // to its destination name. Any error above this point has
-    // already short-circuited via `?` and the `PendingWrite` guard
-    // has removed the temp on drop. See #65.
-    if let Some((guard, local_path)) = pending {
-        guard.promote_to(&local_path)?;
+    // already short-circuited via `?` and `NamedTempFile`'s Drop
+    // has removed the temp. `persist()` returns a `PersistError`
+    // wrapping the temp file on failure; we let that drop here so
+    // the temp is cleaned up even when the rename itself fails.
+    // See #65.
+    if let Some((temp, local_path)) = pending {
+        temp.persist(&local_path).map_err(|e| BatonError {
+            code: -1,
+            message: format!("renaming temp file to {}: {}", local_path.display(), e.error),
+        })?;
     }
 
     Ok(Target::DataObject(data_obj))
