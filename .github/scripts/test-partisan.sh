@@ -69,6 +69,13 @@ echo "irods" | script -q -c "iinit" /dev/null
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
 
+# Partisan parses `baton-do --version` and may gate behaviour on
+# the reported version tuple. Switch baton-rs into strict-compat
+# mode so it reports the upstream baton release we target wire
+# parity with (see SESSIONS.md, #58). Unset → baton-rs crate
+# version, which is the wrong shape for downstream consumers.
+export STRICT_BATON_COMPAT=1
+
 # Python build dependencies — same set partisan's own
 # `Dockerfile.dev` installs (pyenv builds CPython from source so it
 # needs the same package set as a from-source CPython install).
