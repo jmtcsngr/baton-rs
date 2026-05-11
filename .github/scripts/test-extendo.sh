@@ -120,12 +120,27 @@ go install github.com/onsi/ginkgo/v2/ginkgo
 which baton-do
 baton-do --version
 
-# Mirrors extendo's own `make test` target plus a verbosity bump
-# for CI logs:
-#   -r        recursively walk test suites
-#   --race    enable the Go race detector
-#   -v        print each spec name as it runs (default is a
-#             dot-per-test summary, which makes a hang invisible
-#             — `Random Seed: ... Will run N of N specs` is the
-#             last thing you see before stdout goes quiet)
-ginkgo -r --race -v
+# Mirrors extendo's own `make test` target plus three diagnostics
+# adjustments for CI:
+#   -r                       recursively walk test suites
+#   --race                   enable the Go race detector
+#   -v                       print each spec name as it runs
+#                            (default is a dot-per-test summary
+#                            which makes a hang invisible)
+#   --timeout=10m            bound the whole suite. Without this
+#                            Ginkgo's default is one hour, so a
+#                            hung spec would tie up the runner
+#                            until GitHub Actions' job-level
+#                            timeout fires instead.
+#   --poll-progress-after=30s
+#   --poll-progress-interval=15s
+#                            if a spec sits longer than 30 s, dump
+#                            the goroutine stacks so we can see
+#                            *where* the hang is — repeated every
+#                            15 s after the first dump. The suite
+#                            normally completes in under a minute,
+#                            so 30 s on a single spec is already
+#                            suspicious.
+ginkgo -r --race -v \
+    --timeout=10m \
+    --poll-progress-after=30s --poll-progress-interval=15s
