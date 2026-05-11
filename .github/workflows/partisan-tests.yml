@@ -26,9 +26,12 @@ on:
 # duplicate the ~15-line iRODS service-container block to keep the
 # reusable workflow uncomplicated.
 #
-# Matrix-shaped for the same 4.2.7 / 4.3.4 / 4.3.5 trio as
-# `unit-tests.yml`, but only 4.3.5 is enabled today. Uncomment the
-# other entries once partisan is stable on 4.3.5.
+# Matrix runs partisan against 4.3.4 / 4.3.5. iRODS 4.2.7 is
+# intentionally excluded: its build image is Ubuntu 16.04, whose
+# stock OpenSSL is too old (1.0.2) for the Python 3.12 pyenv
+# install partisan requires (`_ssl` extension needs OpenSSL ≥
+# 1.1.1). `unit-tests.yml` still covers 4.2.7 directly — no
+# Python involved on that path.
 #
 # The job is intentionally **informational long-term**
 # (`continue-on-error: true`): partisan is a downstream consumer
@@ -49,12 +52,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # - irods: "4.2.7"
-          #   build_image: "ghcr.io/wtsi-npg/ub-16.04-irods-clients-dev-4.2.7:latest"
-          #   server_image: "ghcr.io/wtsi-npg/ub-16.04-irods-4.2.7:latest"
-          # - irods: "4.3.4"
-          #   build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.4:latest"
-          #   server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.4:latest"
+          # iRODS 4.2.7 deliberately omitted — Ubuntu 16.04 base
+          # image ships OpenSSL 1.0.2, which can't build the
+          # Python 3.12 `_ssl` extension partisan needs. See the
+          # header comment.
+          - irods: "4.3.4"
+            build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.4:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.4:latest"
           - irods: "4.3.5"
             build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.5:latest"
             server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.5:latest"
