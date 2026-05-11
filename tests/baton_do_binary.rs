@@ -483,7 +483,7 @@ fn binary_dispatches_metaquery_returns_multiple() {
     let mut input = MetaqueryInput::default();
     input.avus = vec![AvuQuery {
         attribute: attr.to_string(),
-        value: value.clone(),
+        value: value.clone().into(),
         units: None,
         operator: Operator::Equals,
     }];
