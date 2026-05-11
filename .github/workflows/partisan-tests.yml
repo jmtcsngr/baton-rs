@@ -26,13 +26,21 @@ on:
 # duplicate the ~15-line iRODS service-container block to keep the
 # reusable workflow uncomplicated.
 #
-# Matrix-shaped for the same 4.2.7 / 4.3.4 / 4.3.5 trio as
-# `unit-tests.yml`, but only 4.3.5 is enabled today. Uncomment the
-# other entries once partisan is stable on 4.3.5. The job is
-# informational (`continue-on-error: true`) — cluster E from #57
-# still fails `test_verify_checksum_good` and we don't want that
-# blocking unrelated PRs. Flip to gating once `test_irods.py` is
-# fully green.
+# Matrix runs partisan against 4.3.4 / 4.3.5. iRODS 4.2.7 is
+# intentionally excluded: its build image is Ubuntu 16.04, whose
+# stock OpenSSL is too old (1.0.2) for the Python 3.12 pyenv
+# install partisan requires (`_ssl` extension needs OpenSSL ≥
+# 1.1.1). `unit-tests.yml` still covers 4.2.7 directly — no
+# Python involved on that path.
+#
+# The job is intentionally **informational long-term**
+# (`continue-on-error: true`): partisan is a downstream consumer
+# pinned to a single SHA, so its tests carry information about
+# wire-compat regressions but shouldn't gate merges on the
+# baton-rs side — schema drift, partisan-pin bumps, or upstream
+# iRODS quirks would all surface here as "fails" the baton-rs
+# author can't fix in their own PR. Treat the partisan job as a
+# signal to investigate, not a merge blocker.
 #
 # Tracks #39 (Session 8), #57 (partisan recon).
 jobs:
@@ -44,12 +52,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # - irods: "4.2.7"
-          #   build_image: "ghcr.io/wtsi-npg/ub-16.04-irods-clients-dev-4.2.7:latest"
-          #   server_image: "ghcr.io/wtsi-npg/ub-16.04-irods-4.2.7:latest"
-          # - irods: "4.3.4"
-          #   build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.4:latest"
-          #   server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.4:latest"
+          # iRODS 4.2.7 deliberately omitted — Ubuntu 16.04 base
+          # image ships OpenSSL 1.0.2, which can't build the
+          # Python 3.12 `_ssl` extension partisan needs. See the
+          # header comment.
+          - irods: "4.3.4"
+            build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.4:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.4:latest"
           - irods: "4.3.5"
             build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.5:latest"
             server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.5:latest"
