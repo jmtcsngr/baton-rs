@@ -120,7 +120,12 @@ go install github.com/onsi/ginkgo/v2/ginkgo
 which baton-do
 baton-do --version
 
-# `ginkgo -r --race` mirrors extendo's own `make test` target.
-# -r recursively walks the test suites; --race enables the Go
-# race detector to catch any goroutine-related regressions.
-ginkgo -r --race
+# Mirrors extendo's own `make test` target plus a verbosity bump
+# for CI logs:
+#   -r        recursively walk test suites
+#   --race    enable the Go race detector
+#   -v        print each spec name as it runs (default is a
+#             dot-per-test summary, which makes a hang invisible
+#             — `Random Seed: ... Will run N of N specs` is the
+#             last thing you see before stdout goes quiet)
+ginkgo -r --race -v
