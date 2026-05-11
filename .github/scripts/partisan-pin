@@ -1,0 +1,8 @@
+# Partisan commit consumed by docker/test-partisan.sh via
+# .github/workflows/partisan-tests.yml. Bump this single SHA to
+# pull a newer partisan into the compat suite. The script ignores
+# lines starting with '#' so this header is fine.
+#
+# Recon context lives in the auto-memory entry
+# `project_partisan_pin.md` and in issue #57 / #49.
+58b56da84ed815063e39acf6616bcc01bc6809a5
