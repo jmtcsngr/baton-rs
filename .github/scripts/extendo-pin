@@ -3,5 +3,6 @@
 # pull a newer extendo into the compat suite. The script ignores
 # lines starting with '#' so this header is fine.
 #
-# Recon context lives in issue #76.
-9b358660e453d2b9e1ba27a387bb5c0a412a8fa6
+# Currently pinned to extendo's v3.1.0 release tag. Recon context
+# lives in issue #76.
+b24b63cce5cd730533c77747d9b55db87fbd68fd
