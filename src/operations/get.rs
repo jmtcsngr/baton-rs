@@ -78,8 +78,11 @@ const READ_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Read a single data object end-to-end.
 ///
-/// Inline mode (`opts.save == false`): bytes accumulated in memory,
-/// base64-encoded, returned on the output `data` field.
+/// Inline mode (`opts.save == false`): bytes accumulated in memory
+/// and returned as raw UTF-8 text on the output `data` field. Non-
+/// UTF-8 input surfaces as `USER_INPUT_PATH_ERR` (-317000) — see
+/// the module-level doc-comment for the upstream-mirroring
+/// rationale.
 ///
 /// Save mode (`opts.save == true`): bytes streamed to disk; `data`
 /// left unset on the output. The local path is constructed per

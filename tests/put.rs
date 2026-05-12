@@ -95,8 +95,7 @@ fn fetch_inline_bytes(conn: &mut RodsConnection, collection: &str, data_object: 
 #[test]
 fn put_round_trips_small_data_object() {
     // Uses a byte-cyclic 256-byte payload so any sign-extension /
-    // base64 / encoding bug shows up symmetrically with the get
-    // tests.
+    // encoding bug shows up symmetrically with the get tests.
     let upload_dir = "/tmp/baton_rs_put_small_dir";
     let data_object = "baton_rs_put_small_obj";
     std::fs::create_dir_all(upload_dir).expect("create upload dir");
