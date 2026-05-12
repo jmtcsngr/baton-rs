@@ -9,6 +9,23 @@
 //! Per-flag fetchers (`fetch_avus`, `fetch_acl`, …) are crate-internal
 //! helpers shared with `baton-metaquery` (Session 4c) via
 //! [`enrich_with_metadata`].
+//!
+//! **Replicate-aware size / checksum** — when `--size` or `--checksum`
+//! is requested, baton-rs picks the canonical replica via a catalog
+//! query (highest replica number among valid replicas) rather than
+//! trusting `rcObjStat`'s value, which reflects only the replica iRODS
+//! happened to pick for the stat. Stat-based fallback runs when the
+//! catalog has no valid replicas (a transient mid-write state). One
+//! extra catalog round-trip per data object on these flags. Wired in
+//! Session 5b.
+//!
+//! **ACL level format** — `parse_acl_level` accepts both upstream
+//! baton's space-separated forms (`"read object"`, `"modify object"`)
+//! and iRODS 4.3.x's underscore-separated forms (`"read_object"`,
+//! `"modify_object"`). The latter only surfaces when querying ACLs
+//! mutated by some 4.3.x-specific paths and was undetected before
+//! Session 6 because earlier list-only tests just read default-server
+//! ACL state.
 
 use crate::connection::{GenQuery, ObjStat, ObjType, RodsConnection};
 use crate::error::BatonError;
