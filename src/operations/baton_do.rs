@@ -595,6 +595,14 @@ mod tests {
         let target = sample_data_object_target();
         let result = metamod_input_from_envelope(&target, &empty_arguments());
         let err = result.expect_err("missing arguments.operation should error");
+        // -403000 USER_INPUT_OPTION_ERR. Aligned with the audit
+        // cleanup (#83). Pin so a future refactor can't regress
+        // to `-1`.
+        assert_eq!(
+            err.code, -403000,
+            "missing arguments.operation should surface as -403000: {:?}",
+            err
+        );
         assert!(
             err.message.contains("arguments.operation is required"),
             "error message should be specific: {:?}",
@@ -635,6 +643,13 @@ mod tests {
         args.operation = Some("delete".to_string());
         let result = metamod_input_from_envelope(&sample_data_object_target(), &args);
         let err = result.expect_err("unknown op should error");
+        // -403000 USER_INPUT_OPTION_ERR. Same code as the
+        // missing-operation case — both are arg-validation failures.
+        assert_eq!(
+            err.code, -403000,
+            "unknown arguments.operation value should surface as -403000: {:?}",
+            err
+        );
         assert!(
             err.message.contains("\"delete\""),
             "error message should name the offending value: {:?}",

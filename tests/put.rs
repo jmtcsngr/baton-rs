@@ -934,11 +934,22 @@ fn put_on_collection_is_error() {
         contents: None,
         error: None,
     });
-    let result = put_one(&mut conn, input, &PutOptions::default());
+    let err = put_one(&mut conn, input, &PutOptions::default())
+        .expect_err("put_one on a collection target should error");
+    // -310000 USER_FILE_DOES_NOT_EXIST. Symmetric with
+    // `put_annotated_error_for_missing_local_file`'s assertion and
+    // with extendo's `data_object_test.go:317` expectation. Pin the
+    // code so a future refactor can't silently regress to `-1`.
+    // Audit follow-up (test code-pinning sweep).
+    assert_eq!(
+        err.code, -310000,
+        "put on a collection target should surface as -310000 (USER_FILE_DOES_NOT_EXIST): {:?}",
+        err
+    );
     assert!(
-        result.is_err(),
-        "expected error when calling put_one on a collection, got {:?}",
-        result
+        err.message.contains("collection"),
+        "error message should mention 'collection': {:?}",
+        err
     );
 }
 

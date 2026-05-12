@@ -2193,4 +2193,70 @@ mod tests {
             wire
         );
     }
+
+    #[test]
+    fn baton_do_envelope_round_trips_nested_extra_value() {
+        // Extras aren't restricted to scalars — a downstream consumer
+        // may want a structured `trace` block or similar. The
+        // `serde_json::Value` element type already supports this; the
+        // round-trip exercises the visitor + flatten serialisation
+        // path for non-scalar values explicitly. Pin: nested objects
+        // and arrays survive verbatim through deserialise → output
+        // construction → serialise.
+        let input = serde_json::json!({
+            "operation": "list",
+            "target": {"collection": "/zone/home"},
+            "trace": {
+                "span_id": "abc",
+                "tags": ["alpha", "beta"],
+                "parent": null,
+            },
+            "client_request_no": 5
+        });
+        let env: BatonDoEnvelope =
+            serde_json::from_value(input.clone()).expect("parse");
+
+        // The nested object is preserved by-value, not flattened.
+        assert_eq!(
+            env.extra.get("trace"),
+            Some(&serde_json::json!({
+                "span_id": "abc",
+                "tags": ["alpha", "beta"],
+                "parent": null,
+            })),
+        );
+        assert_eq!(
+            env.extra.get("client_request_no"),
+            Some(&serde_json::json!(5))
+        );
+
+        // BTreeMap gives deterministic key order on serialise. The
+        // doc-comment on `BatonDoEnvelope.extra` cites this as the
+        // reason we chose BTreeMap over HashMap; pin it here so the
+        // choice can't silently regress.
+        let out = BatonDoOutput::new(env, None, None);
+        let first = serde_json::to_string(&out).unwrap();
+        let second = serde_json::to_string(&out).unwrap();
+        assert_eq!(
+            first, second,
+            "BTreeMap-backed extra must serialise byte-for-byte identically across calls"
+        );
+
+        // And the nested structure round-trips at the top level
+        // (flatten puts entries at the parent level rather than
+        // nesting under an "extra" key).
+        let wire = serde_json::to_value(&out).unwrap();
+        assert_eq!(
+            wire.get("trace"),
+            Some(&serde_json::json!({
+                "span_id": "abc",
+                "tags": ["alpha", "beta"],
+                "parent": null,
+            })),
+        );
+        assert_eq!(
+            wire.get("client_request_no"),
+            Some(&serde_json::json!(5))
+        );
+    }
 }
