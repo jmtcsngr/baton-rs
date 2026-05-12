@@ -1,0 +1,96 @@
+name: "Extendo compatibility tests"
+
+# Trigger budget is deliberately permissive while this workflow
+# is being iterated on: run on every push and every PR so failure
+# modes surface fast. Once the suite is stable across CI runs,
+# tighten to the partisan pattern (`pull_request`, `push` to main,
+# and `push` to branches matching `**compat_extendo**`) to keep
+# the Actions bill sensible. See `partisan-tests.yml` for the
+# target end state.
+on: [push, pull_request]
+
+# End-to-end run of extendo's Ginkgo suite against baton-rs
+# binaries. Extendo is a Go consumer of the baton-do wire envelope;
+# adds a second downstream-consumer compat dimension on top of
+# `partisan-tests.yml`. Tracks #76.
+#
+# Why this workflow doesn't call the `_irods-test.yml` reusable
+# workflow: extendo needs a Go toolchain install cached across
+# runs, which has no business in the unit-tests pipeline. We
+# duplicate the ~15-line iRODS service-container block to keep the
+# reusable workflow uncomplicated.
+#
+# Matrix runs the full 4.2.7 / 4.3.4 / 4.3.5 trio. Unlike the
+# partisan workflow, 4.2.7 (Ubuntu 16.04, OpenSSL 1.0.2) is
+# tractable here because Go's release tarballs are statically
+# linked and don't pull modern OpenSSL the way pyenv's Python
+# build does.
+#
+# Informational long-term (`continue-on-error: true`): extendo
+# is a downstream consumer pinned to a single SHA, so its tests
+# carry information about wire-compat regressions but shouldn't
+# gate merges on the baton-rs side. Same policy as the partisan
+# workflow.
+jobs:
+  test:
+    name: "extendo / iRODS ${{ matrix.irods }}"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - irods: "4.2.7"
+            build_image: "ghcr.io/wtsi-npg/ub-16.04-irods-clients-dev-4.2.7:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-16.04-irods-4.2.7:latest"
+          - irods: "4.3.4"
+            build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.4:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.4:latest"
+          - irods: "4.3.5"
+            build_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-dev-4.3.5:latest"
+            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.5:latest"
+
+    services:
+      irods-server:
+        image: ${{ matrix.server_image }}
+        ports:
+          - "1247:1247"
+          - "20000-20199:20000-20199"
+        volumes:
+          - /dev/shm:/dev/shm
+        options: >-
+          --health-cmd "nc -z -v localhost 1247"
+          --health-start-period 60s
+          --health-interval 10s
+          --health-timeout 20s
+          --health-retries 6
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      # Cache the Go toolchain + GOPATH (downloaded modules,
+      # ginkgo binary) so subsequent runs skip the ~30 s
+      # tarball + go-mod-download work. Key on the script + pin
+      # file so any bump (Go version, extendo pin, install
+      # logic) invalidates the cache automatically. Path is
+      # workspace-relative because that's the directory the
+      # build action mounts into the container.
+      - name: "Cache Go toolchain + GOPATH"
+        uses: actions/cache@v4
+        with:
+          path: .go-cache
+          key: go-${{ matrix.irods }}-${{ hashFiles('.github/scripts/test-extendo.sh', '.github/scripts/extendo-pin') }}
+          restore-keys: |
+            go-${{ matrix.irods }}-
+
+      - name: "Run extendo ginkgo"
+        uses: wtsi-npg/build-irods-client-action@v1.1.1
+        with:
+          build-image: ${{ matrix.build_image }}
+          build-script: .github/scripts/test-extendo.sh
+          docker-network: ${{ job.services.irods-server.network }}
+
+      - name: "Show test log"
+        if: ${{ failure() }}
+        run: find "$GITHUB_WORKSPACE" -name "*.log" -exec cat {} \;

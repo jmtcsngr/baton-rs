@@ -1,0 +1,8 @@
+# Extendo commit consumed by .github/scripts/test-extendo.sh via
+# .github/workflows/extendo-tests.yml. Bump this single SHA to
+# pull a newer extendo into the compat suite. The script ignores
+# lines starting with '#' so this header is fine.
+#
+# Currently pinned to extendo's v3.1.0 release tag. Recon context
+# lives in issue #76.
+b24b63cce5cd730533c77747d9b55db87fbd68fd
