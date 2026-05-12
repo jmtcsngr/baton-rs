@@ -1,0 +1,65 @@
+name: "Cargo audit"
+
+# Run `cargo audit` against the resolved dep tree on every PR and
+# every push to main. Informational long-term — the job is set to
+# `continue-on-error: true` so a fresh advisory against a
+# transitive dep doesn't fail PRs that have nothing to do with
+# the advisory. Use the run output as a signal to investigate
+# (and probably bump the offending dep), not as a merge blocker.
+#
+# Why a separate workflow rather than bolting onto unit-tests.yml:
+# `cargo audit` is a pure-Rust static check — it doesn't need the
+# iRODS service container or any of the build-image plumbing the
+# unit-tests path carries. Keeping it standalone means it runs in
+# seconds and its result is independent of the iRODS-matrix
+# state.
+#
+# Why no third-party action wrapping `cargo audit`: this workflow
+# uses only official `actions/*` and the stock Rust toolchain
+# that ships on `ubuntu-latest`. Reduces the supply-chain surface
+# area to "what GitHub ships" — no separate action publisher to
+# vet. `cargo install cargo-audit` is a direct dependency on the
+# `cargo-audit` crate from crates.io (locked via `--locked`), not
+# on an action repo's release artefacts.
+#
+# Direct-dep audit recap (from PR #87's pre-release sweep): all
+# 11 direct deps are used, recent, and clean. The risk this
+# workflow catches is transitive — `anyhow = "1"` style pins
+# resolve to whatever's current, and a future advisory against
+# something three deps deep would otherwise go unnoticed.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  audit:
+    name: "cargo audit"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      # Cache the installed `cargo-audit` binary between runs.
+      # First-run `cargo install` from source takes ~30 s on a
+      # cold runner; cache restore is ~1 s. Key includes the OS
+      # so a Linux binary doesn't get restored on a future macOS
+      # runner. No version pin in the key — we want the latest
+      # `cargo-audit` each time the cache is missed (advisory
+      # database is fetched on every run regardless).
+      - name: "Cache cargo-audit binary"
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}
+
+      - name: "Install cargo-audit (if not cached)"
+        run: |
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install --locked cargo-audit
+          fi
+
+      - name: "Run cargo audit"
+        run: cargo audit
