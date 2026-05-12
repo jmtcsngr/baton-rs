@@ -174,9 +174,11 @@ fn dispatch_inner(
                 }
                 None => (
                     None,
-                    // -403000 USER_INPUT_OPTION_ERR — missing
-                    // required arg. Wire-shape align per audit
-                    // on PR #80's thread.
+                    // -403000 USER_INPUT_OPTION_ERR. Matches
+                    // upstream baton's code for arg-validation
+                    // failures (`baton/src/read.c:603-607` uses
+                    // the same code on the checksum verify+calc
+                    // mutex). Audit cleanup landed in #83.
                     Some(BatonError::from_irods_with_context(
                         -403000,
                         "move via baton-do requires arguments.path (destination)",

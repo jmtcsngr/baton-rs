@@ -60,8 +60,11 @@ pub fn rmdir_one(
     let path = match &target {
         Target::Collection(c) => c.collection.clone(),
         Target::DataObject(d) => {
-            // -310000 USER_FILE_DOES_NOT_EXIST. Wire-shape align
-            // with upstream baton; see audit on PR #80's thread.
+            // -310000 USER_FILE_DOES_NOT_EXIST. Upstream baton
+            // surfaces the iRODS code on a wrong-type target;
+            // downstream consumers (partisan, extendo) regex on
+            // the iRODS code, not on baton-rs's synthetic -1.
+            // Audit cleanup landed in #83.
             return Err(BatonError::from_irods_with_context(
                 -310000,
                 &format!(
