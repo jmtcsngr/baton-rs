@@ -580,6 +580,15 @@ fn binary_dispatches_checksum_rejects_verify_and_calculate_combo() {
         .error
         .as_ref()
         .expect("verify+calculate must be rejected");
+    // -403000 USER_INPUT_OPTION_ERR. Matches the upstream code
+    // (`baton/src/read.c:603-607`). Aligned with the broader
+    // synthetic-`-1` audit cleanup (#83). Pin the code so a future
+    // refactor can't silently regress to `-1`.
+    assert_eq!(
+        err.code, -403000,
+        "verify+calculate combo should surface as -403000 (USER_INPUT_OPTION_ERR): {:?}",
+        err
+    );
     assert!(
         err.message.to_lowercase().contains("verify")
             && err.message.to_lowercase().contains("calculate"),
