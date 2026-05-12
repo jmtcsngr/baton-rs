@@ -95,13 +95,17 @@ pub fn put_one(
     let mut data_obj = match target {
         Target::DataObject(d) => d,
         Target::Collection(c) => {
-            return Err(BatonError {
-                code: -1,
-                message: format!(
+            // -310000 USER_FILE_DOES_NOT_EXIST. Extendo's
+            // `Archive a DataObject when archiving a collection`
+            // test (`data_object_test.go:317`) asserts on the
+            // iRODS code. Wire-shape align with upstream baton.
+            return Err(BatonError::from_irods_with_context(
+                -310000,
+                &format!(
                     "baton-put: target is a collection, not a data object: {}",
                     c.collection
                 ),
-            });
+            ));
         }
     };
 
@@ -117,9 +121,19 @@ pub fn put_one(
     let mut local_path = PathBuf::from(directory);
     local_path.push(basename);
 
-    let mut file = File::open(&local_path).map_err(|e| BatonError {
-        code: -1,
-        message: format!("could not open local file {}: {}", local_path.display(), e),
+    let mut file = File::open(&local_path).map_err(|e| {
+        // -310000 USER_FILE_DOES_NOT_EXIST. Extendo's
+        // `Put a directory without recursion` test
+        // (`client_test.go:633`) sends a directory path here,
+        // which `File::open` rejects with `IsADirectory`.
+        BatonError::from_irods_with_context(
+            -310000,
+            &format!(
+                "could not open local file {}: {}",
+                local_path.display(),
+                e
+            ),
+        )
     })?;
 
     // Client-side MD5 is only computed when --verify is set. Allocate
@@ -213,9 +227,14 @@ fn stream_file_to_handle<R: Read>(
 ) -> Result<(), BatonError> {
     let mut buf = vec![0u8; WRITE_CHUNK_SIZE];
     loop {
-        let n = file.read(&mut buf).map_err(|e| BatonError {
-            code: -1,
-            message: format!("reading local file: {}", e),
+        let n = file.read(&mut buf).map_err(|e| {
+            // -310000 USER_FILE_DOES_NOT_EXIST — local-FS error
+            // family. Mid-stream read failure is rare but the
+            // wire shape should match the file-open code.
+            BatonError::from_irods_with_context(
+                -310000,
+                &format!("reading local file: {}", e),
+            )
         })?;
         if n == 0 {
             break;
