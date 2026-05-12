@@ -1,0 +1,44 @@
+name: "Cargo audit"
+
+# Run `cargo audit` against the resolved dep tree on every PR and
+# every push to main. Informational long-term — the job is set to
+# `continue-on-error: true` so a fresh advisory against a
+# transitive dep doesn't fail PRs that have nothing to do with
+# the advisory. Use the run output as a signal to investigate
+# (and probably bump the offending dep), not as a merge blocker.
+#
+# Why a separate workflow rather than bolting onto unit-tests.yml:
+# `cargo audit` is a pure-Rust static check — it doesn't need the
+# iRODS service container or any of the build-image plumbing the
+# unit-tests path carries. Keeping it standalone means it runs in
+# seconds and its result is independent of the iRODS-matrix
+# state.
+#
+# Direct-dep audit recap (from PR #87's pre-release sweep): all
+# 11 direct deps are used, recent, and clean. The risk this
+# workflow catches is transitive — `anyhow = "1"` style pins
+# resolve to whatever's current, and a future advisory against
+# something three deps deep would otherwise go unnoticed.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  audit:
+    name: "cargo audit"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      - name: "Run cargo audit"
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          # Token only used to post annotations on the PR /
+          # commit. The default GITHUB_TOKEN scope (read+write
+          # on issues / pull-requests for the same repo) is
+          # sufficient.
+          token: ${{ secrets.GITHUB_TOKEN }}
