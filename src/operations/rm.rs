@@ -42,11 +42,11 @@ pub fn rm_one(
         Target::DataObject(_) => target.path(),
         Target::Collection(c) => {
             // -310000 USER_FILE_DOES_NOT_EXIST. Aligns with the
-            // wire shape upstream baton emits when a put/rm path
+            // wire shape upstream baton emits when a rm path
             // resolves to a collection rather than a data object;
             // downstream consumers (extendo, partisan) regex on
             // the iRODS code, not on baton-rs's synthetic -1.
-            // See the audit on PR #80's thread.
+            // Audit cleanup landed in #83.
             return Err(BatonError::from_irods_with_context(
                 -310000,
                 &format!(

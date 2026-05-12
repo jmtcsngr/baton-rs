@@ -102,8 +102,11 @@ pub fn get_one(
     let mut data_obj = match target {
         Target::DataObject(d) => d,
         Target::Collection(c) => {
-            // -310000 USER_FILE_DOES_NOT_EXIST. Wire-shape align
-            // with upstream baton; see audit on PR #80's thread.
+            // -310000 USER_FILE_DOES_NOT_EXIST. Upstream baton
+            // surfaces the iRODS code on a wrong-type target;
+            // downstream consumers (partisan, extendo) regex on
+            // the iRODS code, not on baton-rs's synthetic -1.
+            // Audit cleanup landed in #83.
             return Err(BatonError::from_irods_with_context(
                 -310000,
                 &format!(
@@ -161,8 +164,9 @@ pub fn get_one(
             .map_err(|e| {
                 // -310000 USER_FILE_DOES_NOT_EXIST. Generalised
                 // "local FS unhappy" code matching upstream baton's
-                // local-side error mapping. Audit on PR #80's
-                // thread.
+                // local-side error mapping (see `baton/src/write.c`
+                // / `read.c` for the same pattern on the other
+                // direction). Audit cleanup landed in #83.
                 BatonError::from_irods_with_context(
                     -310000,
                     &format!(
@@ -258,7 +262,8 @@ pub fn get_one(
     if let Some((temp, local_path)) = pending {
         temp.persist(&local_path).map_err(|e| {
             // -310000 USER_FILE_DOES_NOT_EXIST — local-FS error
-            // family. Audit on PR #80's thread.
+            // family, same code as the tempfile-create path above.
+            // Audit cleanup landed in #83.
             BatonError::from_irods_with_context(
                 -310000,
                 &format!(
@@ -321,7 +326,8 @@ fn stream_to_writer<W: Write>(
         }
         out.write_all(&buf[..n]).map_err(|e| {
             // -310000 USER_FILE_DOES_NOT_EXIST — local-FS error
-            // family. Audit on PR #80's thread.
+            // family, same code as the tempfile-create / persist
+            // paths above. Audit cleanup landed in #83.
             BatonError::from_irods_with_context(
                 -310000,
                 &format!("writing local file: {}", e),
