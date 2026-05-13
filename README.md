@@ -122,7 +122,7 @@ when running such consumers against baton-rs.
 
 ```sh
 $ baton-do --version
-0.1.0
+1.0.0-alpha.0
 
 $ STRICT_BATON_COMPAT=1 baton-do --version
 6.0.0

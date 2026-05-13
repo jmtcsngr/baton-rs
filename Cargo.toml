@@ -1,8 +1,11 @@
 [package]
-name    = "baton-rs"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-2.0"
+name        = "baton-rs"
+version     = "1.0.0-alpha.0"
+edition     = "2021"
+license     = "GPL-2.0"
+description = "Rust reimplementation of baton, the iRODS metadata client. Wire-compatible with upstream baton 6.0.0."
+repository  = "https://github.com/jmtcsngr/baton-rs"
+readme      = "README.md"
 
 [dependencies]
 anyhow             = "1"
