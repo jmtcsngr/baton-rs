@@ -35,10 +35,16 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
+          # `latest` is gated on non-prerelease tags: SemVer prerelease
+          # versions always carry a hyphen (e.g. `1.0.0-alpha.0`) and
+          # we don't want `:latest` pointing at an alpha or rc. The
+          # semver patterns below produce `{{major}}.{{minor}}` only
+          # for non-prerelease tags by default (action behaviour), so
+          # an alpha emits only `:1.0.0-alpha.0` and nothing else.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: "Build and push"
         uses: docker/build-push-action@v7
