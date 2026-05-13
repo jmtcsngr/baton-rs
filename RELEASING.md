@@ -92,7 +92,19 @@ Open the PR, wait for unit-tests CI green, merge.
 
 ```sh
 git checkout main
+git fetch origin
 git pull --ff-only
+
+# Verify local main matches origin/main. Tagging stale main produces a
+# tag pointing at a commit predating the release-prep PR; the published
+# container then reports the old Cargo.toml version instead of the tag.
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
+  || { echo "main is not at origin/main — pull before tagging"; exit 1; }
+
+# HEAD should be the release-prep PR's merge commit.
+git log -1 --oneline
+# Expected: <sha> release: <version> (#NN)
+
 git tag -a <version> -m "<version> release"
 git push origin <version>
 ```
@@ -101,8 +113,17 @@ The tag triggers `.github/workflows/publish.yml`, which builds release
 binaries in the iRODS-clients-dev container, then builds and pushes
 the runtime image to `ghcr.io/jmtcsngr/baton-rs` with these tags:
 
-- Always: `<version>` (e.g. `1.0.0-alpha.0`).
+- Always: `<version>` (e.g. `1.0.0-alpha.1`).
 - Non-prerelease only: `<major>.<minor>` (e.g. `1.0`) and `latest`.
+
+After the workflow finishes, confirm the tag resolves to the merge
+commit you expected:
+
+```sh
+gh api repos/jmtcsngr/baton-rs/git/refs/tags/<version> \
+  --jq '.object.sha'
+# Should match the `git log -1 --oneline` SHA from above.
+```
 
 Watch the run:
 
