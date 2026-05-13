@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Tag format is bare semver (no `v` prefix) — the git tag matches
 `Cargo.toml`'s `version` field byte-for-byte.
 
-## [1.0.0-alpha.0] — 2026-05-13
+## [1.0.0-alpha.1] — 2026-05-13
 
 First public preview. Wire-compatible with upstream
 [baton](https://github.com/wtsi-npg/baton) 6.0.0 for the success path
@@ -51,4 +51,4 @@ README.
   today. Pluggable hash-scheme support is tracked in #31, the matrix
   in #27.
 
-[1.0.0-alpha.0]: https://github.com/jmtcsngr/baton-rs/releases/tag/1.0.0-alpha.0
+[1.0.0-alpha.1]: https://github.com/jmtcsngr/baton-rs/releases/tag/1.0.0-alpha.1
