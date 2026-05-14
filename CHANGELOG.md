@@ -7,6 +7,31 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Tag format is bare semver (no `v` prefix) — the git tag matches
 `Cargo.toml`'s `version` field byte-for-byte.
 
+## [1.0.0-alpha.2] — 2026-05-13
+
+### Changed
+
+- **Container entrypoint pattern aligned with upstream baton.**
+  Dropped `ENTRYPOINT ["/usr/local/bin/baton-do"]` in favour of
+  `CMD ["/bin/bash"]` and no entrypoint, matching upstream's dev image
+  convention. Callers that relied on `docker run image --version` or
+  `singularity run docker://image --version` need to switch to an
+  explicit invocation — e.g. `docker run image baton-do --version` or
+  `singularity exec docker://image baton-do --version`.
+- Container runs as non-root `appuser` (UID/GID 1000). Under
+  singularity the host user takes over; under plain `docker run` the
+  container runs unprivileged.
+- Container default locale set to `en_GB.UTF-8`; `TZ` set to
+  `Etc/UTC`.
+- iRODS runtime version parameterised via `ARG IRODS_VERSION` (default
+  `4.3.5`). Override at build time only if rebuilding against a
+  matched custom binary set.
+- APT repo signing key migrated from the deprecated `apt-key add`
+  pattern to `gpg --dearmor` + `signed-by=` keyring under
+  `/etc/apt/keyrings/`. No user-visible change.
+
+[1.0.0-alpha.2]: https://github.com/jmtcsngr/baton-rs/releases/tag/1.0.0-alpha.2
+
 ## [1.0.0-alpha.1] — 2026-05-13
 
 First public preview. Wire-compatible with upstream

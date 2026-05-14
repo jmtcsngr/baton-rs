@@ -1,6 +1,6 @@
 [package]
 name        = "baton-rs"
-version     = "1.0.0-alpha.1"
+version     = "1.0.0-alpha.2"
 edition     = "2021"
 license     = "GPL-2.0"
 description = "Rust reimplementation of baton, the iRODS metadata client. Wire-compatible with upstream baton 6.0.0."
