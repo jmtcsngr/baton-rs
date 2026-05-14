@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Tag format is bare semver (no `v` prefix) — the git tag matches
 `Cargo.toml`'s `version` field byte-for-byte.
 
-## [1.0.0-alpha.2] — 2026-05-13
+## [1.0.0-alpha.2] — 2026-05-14
 
 ### Changed
 
