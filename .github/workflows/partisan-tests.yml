@@ -80,7 +80,7 @@ jobs:
 
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Cache the pyenv tree plus the built Python interpreter so
       # subsequent runs skip the ~5 min source build. Key on the

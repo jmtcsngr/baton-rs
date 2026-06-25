@@ -40,7 +40,7 @@ jobs:
     continue-on-error: true
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Cache the installed `cargo-audit` binary between runs.
       # First-run `cargo install` from source takes ~30 s on a
