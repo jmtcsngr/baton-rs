@@ -67,7 +67,7 @@ jobs:
 
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Cache the Go toolchain + GOPATH (downloaded modules,
       # ginkgo binary) so subsequent runs skip the ~30 s
