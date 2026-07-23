@@ -4,10 +4,10 @@ A Rust reimplementation of [baton](https://github.com/wtsi-npg/baton), the iRODS
 client focused on metadata operations via a single JSON interface. Targets
 wire-compat with upstream baton **6.1.0**.
 
-**Status:** Under active development. The seven binaries are implemented and
-exercised against iRODS 4.2.7 / 4.3.4 / 4.3.5 in CI, plus integration runs
-against the downstream Python ([partisan](https://github.com/wtsi-npg/partisan))
-and Go ([extendo](https://github.com/wtsi-npg/extendo)) consumers. See
+**Status:** Stable (1.0.0). All seven binaries are implemented and exercised
+against iRODS 4.2.7 / 4.3.4 / 4.3.5 in CI, plus integration runs against the
+downstream Python ([partisan](https://github.com/wtsi-npg/partisan)) and Go
+([extendo](https://github.com/wtsi-npg/extendo)) consumers. See
 [`PLAN.md`](PLAN.md) for the multi-session implementation plan and
 [`SESSIONS.md`](SESSIONS.md) for session progress and cross-cutting
 conventions.
@@ -122,7 +122,7 @@ when running such consumers against baton-rs.
 
 ```sh
 $ baton-do --version
-1.0.0-alpha.2
+1.0.0
 
 $ STRICT_BATON_COMPAT=1 baton-do --version
 6.1.0

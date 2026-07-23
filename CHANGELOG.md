@@ -7,6 +7,23 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Tag format is bare semver (no `v` prefix) — the git tag matches
 `Cargo.toml`'s `version` field byte-for-byte.
 
+## [1.0.0] — 2026-07-23
+
+First stable release. Full wire-compat with upstream baton 6.1.0
+across all seven binaries, continuously validated against partisan
+and extendo.
+
+### Notes
+
+- Known limitations, documented rather than fixed: cross-zone
+  metaquery scoping ([#77]) and hash schemes beyond MD5 ([#31],
+  matrix in [#27]).
+
+[1.0.0]: https://github.com/jmtcsngr/baton-rs/releases/tag/1.0.0
+[#77]: https://github.com/jmtcsngr/baton-rs/issues/77
+[#31]: https://github.com/jmtcsngr/baton-rs/issues/31
+[#27]: https://github.com/jmtcsngr/baton-rs/issues/27
+
 ## [1.0.0-alpha.2] — 2026-05-14
 
 ### Changed
