@@ -10,7 +10,7 @@ Paste the relevant sections at the start of each new session to restore context 
 
 These values do not change during normal development. If they do change, note the reason here.
 
-- **Target baton version for parity:** `6.0.0`
+- **Target baton version for parity:** `6.1.0` _(bumped from `6.0.0` 2026-07-23 — upstream released 6.0.1 and 6.1.0; 6.1.0 adds a `physical_path` field to replicate JSON objects, not yet implemented on baton-rs's side, tracked in #101. See Changelog for this file, below.)_
 - **Reference schema:** <https://wtsi-npg.github.io/baton/>
 - **Primary compatibility oracle:** partisan's Python test suite, run with baton-rs's `baton-do` on `PATH`
 - **Supported iRODS versions (CI matrix):** 4.2.7, 4.3.4, 4.3.5 _(add 5.0.1 when ready)_
@@ -583,3 +583,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
   - **#82** — extendo pin bumped to `v3.1.0` (`b24b63c…`, against `feat/extendo-ci` base). Tagged release over devel HEAD.
   - **#83** — synthetic-`-1` audit cleanup across 17 validation paths. Group A (target-type) and B (local-FS) surface `-310000` (USER_FILE_DOES_NOT_EXIST); Group C (argument validation) surfaces `-403000` (USER_INPUT_OPTION_ERR). Adds `-403000` to `error::descriptive_phrase`.
   - **#85** — client-side `verify_checksum` mismatch aligned to `-407000` (CHECK_VERIFICATION_RESULTS). Final audit follow-up; client-side and server-side mismatch now surface under the same code.
+- `2026-07-23` — Target baton version for parity bumped `6.0.0` → `6.1.0`. Upstream shipped two releases we hadn't tracked: `6.0.1` (2026-05-19, mostly CI/dependency churn plus two OOB-write hardening fixes in its genQuery builder — baton-rs has the same unbounded-condition-count gap, filed as #100) and `6.1.0` (2026-07-02, adds a `physical_path` field to replicate JSON objects, filed as #101, not yet implemented). `BATON_COMPAT_VERSION` (`src/version.rs`), `Cargo.toml`'s description, and `README.md`'s compat-version references updated to match. `physical_path` (#101) is real, tracked wire-compat debt against the new pin — re-pinning ahead of implementing it was a deliberate choice (matches PLAN.md's stated policy: schema changes in later 6.x releases should be explicit decisions, not silent drift) rather than waiting for the field to land first.

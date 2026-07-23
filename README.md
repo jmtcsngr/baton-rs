@@ -2,7 +2,7 @@
 
 A Rust reimplementation of [baton](https://github.com/wtsi-npg/baton), the iRODS
 client focused on metadata operations via a single JSON interface. Targets
-wire-compat with upstream baton **6.0.0**.
+wire-compat with upstream baton **6.1.0**.
 
 **Status:** Under active development. The seven binaries are implemented and
 exercised against iRODS 4.2.7 / 4.3.4 / 4.3.5 in CI, plus integration runs
@@ -57,7 +57,7 @@ without coordinating schema changes with baton-rs. See the
 
 ## Compatibility with upstream baton
 
-baton-rs is wire-compatible with upstream baton 6.0.0 for the success
+baton-rs is wire-compatible with upstream baton 6.1.0 for the success
 path and the in-band error path. Known divergences:
 
 - **Parse-error wire shape** — baton-rs emits a stand-alone synthetic
@@ -79,6 +79,9 @@ path and the in-band error path. Known divergences:
   default; CI pins `irods_default_hash_scheme = MD5`). SHA2 wiring
   tracked in [#31](https://github.com/jmtcsngr/baton-rs/issues/31) with
   the matrix in [#27](https://github.com/jmtcsngr/baton-rs/issues/27).
+- **`physical_path`** — upstream 6.1.0 added this field to every
+  replicate JSON object; baton-rs doesn't emit it yet. Tracked in
+  [#101](https://github.com/jmtcsngr/baton-rs/issues/101).
 
 ## Downstream consumer CI
 
@@ -111,7 +114,7 @@ environment variable:
 | Env var state                          | `--version` reports                                        |
 |----------------------------------------|------------------------------------------------------------|
 | Unset (or empty string)                | The baton-rs crate version (`Cargo.toml`'s `version`).     |
-| Set to any non-empty value             | `BATON_COMPAT_VERSION` (e.g. `6.0.0`) — the upstream baton release baton-rs targets wire-compat with. |
+| Set to any non-empty value             | `BATON_COMPAT_VERSION` (e.g. `6.1.0`) — the upstream baton release baton-rs targets wire-compat with. |
 
 Honest reporting is the default so logs and debugging surfaces aren't misled
 about what's actually running. The compat mode exists for downstream consumers
@@ -125,7 +128,7 @@ $ baton-do --version
 1.0.0-alpha.1
 
 $ STRICT_BATON_COMPAT=1 baton-do --version
-6.0.0
+6.1.0
 ```
 
 The `STRICT_BATON_COMPAT` toggle is also reserved for future wire-format

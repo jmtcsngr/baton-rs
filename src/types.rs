@@ -5,8 +5,10 @@
 
 //! JSON data types for the baton-rs API.
 //!
-//! All types round-trip against the baton 6.0.0 JSON schema
-//! (<https://wtsi-npg.github.io/baton/>).
+//! All types round-trip against the baton 6.1.0 JSON schema
+//! (<https://wtsi-npg.github.io/baton/>), with one known gap: the
+//! 6.1.0-introduced `physical_path` field on replicate objects isn't
+//! modelled yet (tracked in #101).
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
