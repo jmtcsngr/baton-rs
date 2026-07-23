@@ -2,6 +2,15 @@
 
 A multi-session plan for reimplementing the [wtsi-npg/baton](https://github.com/wtsi-npg/baton) iRODS client in Rust using Claude Code.
 
+> **Status: historical.** This is the original plan, written before Session 0.
+> Execution diverged from it in several tracked ways as the project learned
+> things the plan didn't anticipate — most notably the iRODS FFI strategy
+> moved from `bindgen` to a hand-written C shim (Session 4.5, issue #9), and
+> Session 8's scope was substantially re-prioritised after a downstream-consumer
+> recon pass. **`SESSIONS.md` is the living source of truth** for what actually
+> shipped, current conventions, and the target baton version; read this
+> document as background on original intent, not as a current spec.
+
 ---
 
 ## Overview
@@ -17,6 +26,7 @@ This plan reimplements baton in Rust across multiple Claude Code sessions, with 
 ## Key architectural decisions
 
 **iRODS binding strategy.** FFI to the iRODS C API via `bindgen`. This mirrors baton's own approach and is the only practical path for full protocol compatibility with iRODS 4.2.x, 4.3.x, and 5.x.
+> **Superseded in Session 4.5** (issue #9): `bindgen` requires libclang ≥ 5.0 at build time, which the iRODS 4.2.7 build image (Ubuntu 16.04, libclang 3.8) can't provide. Replaced with a hand-written C shim (`shim/ffi_shim.{c,h}`, mirrored by hand in `src/ffi.rs`) — the shim is the only translation unit that includes iRODS headers at all. See `SESSIONS.md`'s Cross-cutting conventions for the current, load-bearing description.
 
 **JSON library.** `serde_json`, with `serde` derives on all types to match baton's JSON schema exactly.
 
@@ -43,13 +53,15 @@ baton-rs/
 │   ├── build-release.sh            # release build script
 │   └── Dockerfile                  # publish image
 ├── Cargo.toml                      # single crate manifest
-├── build.rs                        # bindgen for iRODS FFI (Session 2 onwards)
+├── build.rs                        # compiles shim/ffi_shim.c (Session 4.5 onwards; bindgen originally, see note above)
 ├── SESSIONS.md                     # inter-session context for Claude Code
+├── shim/
+│   ├── ffi_shim.h                  # C shim's public surface, mirrored by hand in src/ffi.rs
+│   └── ffi_shim.c                  # only translation unit that includes iRODS headers
 ├── src/
 │   ├── lib.rs                      # re-exports from modules below
-│   ├── types.rs                    # DataObject, Avu, Acl, Replicate, etc.
-│   ├── json.rs                     # serde helpers, short-name aliases
-│   ├── ffi.rs                      # safe wrappers over bindgen output
+│   ├── types.rs                    # DataObject, Avu, Acl, Replicate, etc. (serde helpers/aliases live inline, not in a separate json.rs)
+│   ├── ffi.rs                      # hand-written mirror of shim/ffi_shim.h (no bindgen)
 │   ├── connection.rs               # RodsConnection, auto-reconnect
 │   ├── operations/                 # per-operation logic shared between binaries
 │   │   ├── list.rs
