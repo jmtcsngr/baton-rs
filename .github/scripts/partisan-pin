@@ -5,4 +5,10 @@
 #
 # Recon context lives in the auto-memory entry
 # `project_partisan_pin.md` and in issue #57 / #49.
-58b56da84ed815063e39acf6616bcc01bc6809a5
+#
+# Bumped 2026-07-23 (devel HEAD) to pick up partisan PR #349
+# ("Add a physical_path attribute to Replica", merged 2026-07-15),
+# whose test_replicas asserts physical_path is populated whenever
+# client_version() >= 6.1.0 — the assertion this repo's #101 /
+# #100 work needs exercised in CI.
+1356610d2a195e881ca55351db68f61e53c4edc4

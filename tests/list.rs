@@ -628,6 +628,13 @@ fn list_data_object_with_replicate() {
         .expect("replica 0 present");
     assert!(!r0.resource.is_empty(), "resource set");
     assert!(!r0.location.is_empty(), "location set");
+    // physical_path (baton 6.1.0, #101 / COL_D_DATA_PATH) is a real
+    // filesystem path under the test container's iRODS vault.
+    assert!(
+        r0.physical_path.starts_with("/var/lib/irods"),
+        "expected physical_path under the iRODS vault, got {:?}",
+        r0.physical_path
+    );
 
     // Every replica must be valid right after iput. This is stricter
     // than the original "r0 is valid" form: on the 4.2.7 CI image

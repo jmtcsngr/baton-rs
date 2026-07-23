@@ -184,13 +184,31 @@ impl GenQuery {
     /// Add `col` to the SELECT list (no aggregation). `col` is one of
     /// the `ffi::SHIM_COL_*` enum values; the shim translates to the
     /// iRODS `COL_*` numeric internally.
-    pub(crate) fn add_select(&mut self, col: ffi::shim_col_t) {
-        unsafe { ffi::shim_query_add_select(self.handle, col) };
+    ///
+    /// Can fail if the select list has already reached iRODS's
+    /// `MAX_NUM_CONDITIONS` capacity — see [`Self::add_where`]'s doc
+    /// comment for why that bound is checked client-side.
+    pub(crate) fn add_select(&mut self, col: ffi::shim_col_t) -> Result<(), BatonError> {
+        let status = unsafe { ffi::shim_query_add_select(self.handle, col) };
+        if status != 0 {
+            return Err(BatonError::from_irods(status));
+        }
+        Ok(())
     }
 
     /// Add a WHERE condition. `condition` is the operator + literal in
     /// the form iRODS's genQuery parser wants, e.g. `"= '/zone/home'"`.
     /// Returns an error if `condition` contains an interior NUL.
+    ///
+    /// Also returns an error once the condition list reaches iRODS's
+    /// `MAX_NUM_CONDITIONS` capacity. `genQueryInp_t.sqlCondInp` is a
+    /// fixed-size array on the iRODS side; without this check, a
+    /// caller-controlled criteria list (e.g. `metaquery`'s
+    /// `timestamps` / `access` arrays, which are unbounded JSON
+    /// input) could write past its end — the same out-of-bounds
+    /// write class upstream baton patched in 6.0.1 (wtsi-npg/baton#337,
+    /// #338). The shim checks and rejects before calling `addInxVal`;
+    /// see `shim/ffi_shim.c::shim_query_add_where`.
     pub(crate) fn add_where(
         &mut self,
         col: ffi::shim_col_t,

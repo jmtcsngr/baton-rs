@@ -875,3 +875,54 @@ fn metaquery_in_operator_with_array_value_matches_any() {
     );
 }
 
+#[test]
+fn metaquery_excessive_access_conditions_returns_clean_error() {
+    // #100: genQueryInp_t's WHERE-condition list is a fixed-size iRODS
+    // array (MAX_NUM_CONDITIONS); addInxVal doesn't bounds-check
+    // before writing. `access` is unbounded caller-supplied JSON (each
+    // entry contributes an owner + level WHERE condition), so a large
+    // enough array must surface a clean in-band error rather than
+    // write past the array — the same class of bug upstream baton
+    // patched in 6.0.1 (wtsi-npg/baton#337, #338). No object needs to
+    // be staged: query construction fails before any catalog round
+    // trip happens.
+    let mut conn = RodsConnection::connect_from_env().expect("connect_from_env");
+    conn.login_from_auth_file().expect("login_from_auth_file");
+
+    // Comfortably above any plausible MAX_NUM_CONDITIONS across the
+    // supported iRODS versions (each entry adds 2 conditions: owner +
+    // level), without depending on the exact compiled-in bound.
+    let access: Vec<AccessQuery> = (0..2000)
+        .map(|i| AccessQuery {
+            owner: format!("baton_rs_bound_test_user_{i}"),
+            level: AclLevel::Read,
+            zone: None,
+        })
+        .collect();
+
+    let input = MetaqueryInput {
+        avus: vec![],
+        timestamps: vec![],
+        access,
+        collection: None,
+        zone: None,
+    };
+
+    let err = metaquery(
+        &mut conn,
+        &input,
+        &MetaqueryFlags {
+            include_data_objects: true,
+            include_collections: false,
+        },
+    )
+    .expect_err("excessive access conditions should error, not crash");
+
+    assert!(
+        err.message.to_lowercase().contains("invalid")
+            || err.message.to_lowercase().contains("argument"),
+        "expected a CAT_INVALID_ARGUMENT-shaped error, got {:?}",
+        err
+    );
+}
+

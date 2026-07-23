@@ -107,6 +107,7 @@ pub const SHIM_COL_COLL_USER_NAME: shim_col_t = 22;
 pub const SHIM_COL_COLL_USER_ZONE: shim_col_t = 23;
 pub const SHIM_COL_COLL_ACCESS_NAME: shim_col_t = 24;
 pub const SHIM_COL_DATA_SIZE: shim_col_t = 25;
+pub const SHIM_COL_DATA_PATH: shim_col_t = 26;
 
 // ---- Data object read/write -------------------------------------------------
 
@@ -163,7 +164,7 @@ extern "C" {
 
     pub fn shim_query_new() -> *mut shim_query_t;
     pub fn shim_query_free(q: *mut shim_query_t);
-    pub fn shim_query_add_select(q: *mut shim_query_t, col: shim_col_t);
+    pub fn shim_query_add_select(q: *mut shim_query_t, col: shim_col_t) -> c_int;
     pub fn shim_query_add_where(
         q: *mut shim_query_t,
         col: shim_col_t,

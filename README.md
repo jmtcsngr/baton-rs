@@ -79,9 +79,6 @@ path and the in-band error path. Known divergences:
   default; CI pins `irods_default_hash_scheme = MD5`). SHA2 wiring
   tracked in [#31](https://github.com/jmtcsngr/baton-rs/issues/31) with
   the matrix in [#27](https://github.com/jmtcsngr/baton-rs/issues/27).
-- **`physical_path`** — upstream 6.1.0 added this field to every
-  replicate JSON object; baton-rs doesn't emit it yet. Tracked in
-  [#101](https://github.com/jmtcsngr/baton-rs/issues/101).
 
 ## Downstream consumer CI
 

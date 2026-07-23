@@ -226,21 +226,39 @@ static int translate_col(shim_col_t col) {
     case SHIM_COL_COLL_USER_ZONE:        return COL_COLL_USER_ZONE;
     case SHIM_COL_COLL_ACCESS_NAME:      return COL_COLL_ACCESS_NAME;
     case SHIM_COL_DATA_SIZE:             return COL_DATA_SIZE;
+    case SHIM_COL_DATA_PATH:             return COL_D_DATA_PATH;
     }
     return -1;
 }
 
-void shim_query_add_select(shim_query_t *q, shim_col_t col) {
-    if (!q) return;
+int shim_query_add_select(shim_query_t *q, shim_col_t col) {
+    if (!q) return -1;
     int icol = translate_col(col);
-    if (icol < 0) return;
+    if (icol < 0) return -1;
+    // Bounds check before writing — see the doc comment on
+    // shim_query_add_where for why iRODS's addInxIval/addInxVal
+    // can't be trusted to reject an over-full list themselves.
+    if (q->inp.selectInp.len >= MAX_NUM_CONDITIONS) {
+        return CAT_INVALID_ARGUMENT;
+    }
     addInxIval(&q->inp.selectInp, icol, 0);
+    return 0;
 }
 
 int shim_query_add_where(shim_query_t *q, shim_col_t col, const char *condition) {
     if (!q || !condition) return -1;
     int icol = translate_col(col);
     if (icol < 0) return -1;
+    // `sqlCondInp` is a fixed-size iRODS `inxValPair_t` array
+    // (`inx[MAX_NUM_CONDITIONS]` / `value[MAX_NUM_CONDITIONS]`);
+    // `addInxVal` writes past the end with no bounds check of its
+    // own if `len` already reached capacity. This is the exact
+    // out-of-bounds write upstream baton patched in 6.0.1
+    // (wtsi-npg/baton#337, #338) — reject before the array overflows
+    // rather than crash or corrupt adjacent memory.
+    if (q->inp.sqlCondInp.len >= MAX_NUM_CONDITIONS) {
+        return CAT_INVALID_ARGUMENT;
+    }
     // addInxVal strdup's the condition string internally, so the
     // caller's buffer can be freed immediately after.
     addInxVal(&q->inp.sqlCondInp, icol, (char *)condition);
