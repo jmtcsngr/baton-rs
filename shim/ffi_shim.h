@@ -185,28 +185,12 @@ void shim_query_free(shim_query_t *q);
 
 // Append a column to the SELECT list. Wraps `addInxIval` after
 // translating `col` from the shim enum to the iRODS `COL_*` value.
-// Returns 0 on success, -1 for an unrecognised `col`, or
-// `CAT_INVALID_ARGUMENT` if the select list has already reached
-// iRODS's `MAX_NUM_CONDITIONS` capacity — see `shim_query_add_where`'s
-// doc comment for why this bound exists.
-int shim_query_add_select(shim_query_t *q, shim_col_t col);
+void shim_query_add_select(shim_query_t *q, shim_col_t col);
 
 // Append a WHERE condition for `col`. `condition` is the iRODS
 // genQuery condition string (e.g. `"= 'foo'"` or `"like 'bar%'"`) and
 // must be NUL-terminated; the shim copies it via `addInxVal`'s strdup.
-// Returns 0 on success, -1 for an unrecognised `col`, or
-// `CAT_INVALID_ARGUMENT` if the condition list has already reached
-// iRODS's `MAX_NUM_CONDITIONS` capacity.
-//
-// `genQueryInp_t.sqlCondInp` / `.selectInp` are iRODS's own
-// fixed-size `inxValPair_t` / `inxIvalPair_t` arrays — `addInxVal` /
-// `addInxIval` do not bounds-check before writing. Upstream baton hit
-// exactly this as an out-of-bounds write when a caller supplied too
-// many query conditions (fixed in baton 6.0.1, wtsi-npg/baton#337 /
-// #338). baton-rs callers can build a query from unbounded
-// caller-supplied JSON (e.g. `metaquery`'s `timestamps` / `access`
-// arrays), so the same guard is needed here — checked client-side,
-// before the call into iRODS, rather than relying on iRODS itself.
+// Returns 0 on success.
 int shim_query_add_where(shim_query_t *q, shim_col_t col, const char *condition);
 
 // Run `q` to completion against `conn`, paging until the catalog

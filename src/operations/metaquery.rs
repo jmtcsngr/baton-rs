@@ -293,8 +293,8 @@ fn query_data_objects(
 ) -> Result<Vec<Target>, BatonError> {
     let mut q = GenQuery::new();
 
-    q.add_select(ffi::SHIM_COL_COLL_NAME)?;
-    q.add_select(ffi::SHIM_COL_DATA_NAME)?;
+    q.add_select(ffi::SHIM_COL_COLL_NAME);
+    q.add_select(ffi::SHIM_COL_DATA_NAME);
 
     apply_avu_conditions_to_data_object(&mut q, &input.avus)?;
     apply_timestamp_conditions_to_data_object(&mut q, &input.timestamps)?;
@@ -392,7 +392,7 @@ fn query_collections(
 ) -> Result<Vec<Target>, BatonError> {
     let mut q = GenQuery::new();
 
-    q.add_select(ffi::SHIM_COL_COLL_NAME)?;
+    q.add_select(ffi::SHIM_COL_COLL_NAME);
 
     apply_avu_conditions_to_collection(&mut q, &input.avus)?;
     apply_timestamp_conditions_to_collection(&mut q, &input.timestamps)?;

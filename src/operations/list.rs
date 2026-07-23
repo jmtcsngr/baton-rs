@@ -253,9 +253,9 @@ fn fetch_avus(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Avu>, Ba
             ffi::SHIM_COL_META_COLL_ATTR_UNITS,
         ),
     };
-    q.add_select(col_attr)?;
-    q.add_select(col_value)?;
-    q.add_select(col_units)?;
+    q.add_select(col_attr);
+    q.add_select(col_value);
+    q.add_select(col_units);
 
     match target {
         Target::DataObject(d) => {
@@ -327,9 +327,9 @@ fn fetch_acl(conn: &mut RodsConnection, target: &Target) -> Result<Vec<Acl>, Bat
             ffi::SHIM_COL_COLL_ACCESS_NAME,
         ),
     };
-    q.add_select(col_user_name)?;
-    q.add_select(col_user_zone)?;
-    q.add_select(col_access_name)?;
+    q.add_select(col_user_name);
+    q.add_select(col_user_zone);
+    q.add_select(col_access_name);
 
     match target {
         Target::DataObject(d) => {
@@ -401,10 +401,10 @@ fn fetch_canonical_replica_state(
     d: &DataObject,
 ) -> Result<Option<CanonicalReplicaState>, BatonError> {
     let mut q = GenQuery::new();
-    q.add_select(ffi::SHIM_COL_DATA_REPL_NUM)?;
-    q.add_select(ffi::SHIM_COL_DATA_SIZE)?;
-    q.add_select(ffi::SHIM_COL_D_DATA_CHECKSUM)?;
-    q.add_select(ffi::SHIM_COL_D_REPL_STATUS)?;
+    q.add_select(ffi::SHIM_COL_DATA_REPL_NUM);
+    q.add_select(ffi::SHIM_COL_DATA_SIZE);
+    q.add_select(ffi::SHIM_COL_D_DATA_CHECKSUM);
+    q.add_select(ffi::SHIM_COL_D_REPL_STATUS);
     q.add_where(
         ffi::SHIM_COL_COLL_NAME,
         &format!("= '{}'", sql_escape(&d.collection)),
@@ -461,12 +461,12 @@ fn fetch_replicates(
     // (COL_D_DATA_CHECKSUM / COL_D_RESC_NAME / COL_D_REPL_STATUS) — not a
     // typo, that's actually how the headers are. Compiler "similar name"
     // hints were the source of truth.
-    q.add_select(ffi::SHIM_COL_DATA_REPL_NUM)?;
-    q.add_select(ffi::SHIM_COL_D_DATA_CHECKSUM)?;
-    q.add_select(ffi::SHIM_COL_R_LOC)?;
-    q.add_select(ffi::SHIM_COL_D_RESC_NAME)?;
-    q.add_select(ffi::SHIM_COL_D_REPL_STATUS)?;
-    q.add_select(ffi::SHIM_COL_DATA_PATH)?;
+    q.add_select(ffi::SHIM_COL_DATA_REPL_NUM);
+    q.add_select(ffi::SHIM_COL_D_DATA_CHECKSUM);
+    q.add_select(ffi::SHIM_COL_R_LOC);
+    q.add_select(ffi::SHIM_COL_D_RESC_NAME);
+    q.add_select(ffi::SHIM_COL_D_REPL_STATUS);
+    q.add_select(ffi::SHIM_COL_DATA_PATH);
 
     q.add_where(
         ffi::SHIM_COL_COLL_NAME,
@@ -523,9 +523,9 @@ fn fetch_timestamps(
         Target::DataObject(d) => {
             // Data object: per-replica timestamps. SELECT order matches the
             // row indices we read out below.
-            q.add_select(ffi::SHIM_COL_D_CREATE_TIME)?;
-            q.add_select(ffi::SHIM_COL_D_MODIFY_TIME)?;
-            q.add_select(ffi::SHIM_COL_DATA_REPL_NUM)?;
+            q.add_select(ffi::SHIM_COL_D_CREATE_TIME);
+            q.add_select(ffi::SHIM_COL_D_MODIFY_TIME);
+            q.add_select(ffi::SHIM_COL_DATA_REPL_NUM);
             q.add_where(
                 ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&d.collection)),
@@ -536,8 +536,8 @@ fn fetch_timestamps(
             )?;
         }
         Target::Collection(c) => {
-            q.add_select(ffi::SHIM_COL_COLL_CREATE_TIME)?;
-            q.add_select(ffi::SHIM_COL_COLL_MODIFY_TIME)?;
+            q.add_select(ffi::SHIM_COL_COLL_CREATE_TIME);
+            q.add_select(ffi::SHIM_COL_COLL_MODIFY_TIME);
             q.add_where(
                 ffi::SHIM_COL_COLL_NAME,
                 &format!("= '{}'", sql_escape(&c.collection)),
@@ -626,7 +626,7 @@ fn fetch_contents(conn: &mut RodsConnection, parent: &str) -> Result<Vec<Item>, 
 
     // 1. Sub-collections directly under `parent`.
     let mut q = GenQuery::new();
-    q.add_select(ffi::SHIM_COL_COLL_NAME)?;
+    q.add_select(ffi::SHIM_COL_COLL_NAME);
     q.add_where(
         ffi::SHIM_COL_COLL_PARENT_NAME,
         &format!("= '{}'", sql_escape(parent)),
@@ -646,7 +646,7 @@ fn fetch_contents(conn: &mut RodsConnection, parent: &str) -> Result<Vec<Item>, 
 
     // 2. Data objects directly under `parent`.
     let mut q = GenQuery::new();
-    q.add_select(ffi::SHIM_COL_DATA_NAME)?;
+    q.add_select(ffi::SHIM_COL_DATA_NAME);
     q.add_where(
         ffi::SHIM_COL_COLL_NAME,
         &format!("= '{}'", sql_escape(parent)),

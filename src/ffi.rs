@@ -164,7 +164,7 @@ extern "C" {
 
     pub fn shim_query_new() -> *mut shim_query_t;
     pub fn shim_query_free(q: *mut shim_query_t);
-    pub fn shim_query_add_select(q: *mut shim_query_t, col: shim_col_t) -> c_int;
+    pub fn shim_query_add_select(q: *mut shim_query_t, col: shim_col_t);
     pub fn shim_query_add_where(
         q: *mut shim_query_t,
         col: shim_col_t,
