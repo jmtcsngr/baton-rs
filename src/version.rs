@@ -35,7 +35,7 @@
 /// recorded in `SESSIONS.md` whenever we re-pin against a newer
 /// upstream baton. The release checklist in #58 calls out this
 /// audit step explicitly.
-pub const BATON_COMPAT_VERSION: &str = "6.0.0";
+pub const BATON_COMPAT_VERSION: &str = "6.1.0";
 
 /// Env var that toggles compat-mode version reporting. See module
 /// doc-comment for the rationale and #58 for the design.

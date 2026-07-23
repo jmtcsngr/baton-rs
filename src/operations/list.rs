@@ -466,6 +466,7 @@ fn fetch_replicates(
     q.add_select(ffi::SHIM_COL_R_LOC);
     q.add_select(ffi::SHIM_COL_D_RESC_NAME);
     q.add_select(ffi::SHIM_COL_D_REPL_STATUS);
+    q.add_select(ffi::SHIM_COL_DATA_PATH);
 
     q.add_where(
         ffi::SHIM_COL_COLL_NAME,
@@ -485,6 +486,7 @@ fn fetch_replicates(
             let location = row.get(2).cloned().unwrap_or_default();
             let resource = row.get(3).cloned().unwrap_or_default();
             let status = row.get(4).cloned().unwrap_or_default();
+            let physical_path = row.get(5).cloned().unwrap_or_default();
 
             let number: u32 = number_str.parse().map_err(|_| BatonError {
                 code: -1,
@@ -497,6 +499,7 @@ fn fetch_replicates(
                 resource,
                 number,
                 valid: status == "1",
+                physical_path,
             })
         })
         .collect()

@@ -1225,7 +1225,7 @@ fn version_flag_unset_reports_crate_version() {
 #[test]
 fn version_flag_with_strict_compat_reports_compat_version() {
     // STRICT_BATON_COMPAT=1 → report BATON_COMPAT_VERSION instead
-    // (currently 6.0.0). Lets partisan's `client_version()` parse
+    // (currently 6.1.0). Lets partisan's `client_version()` parse
     // the result and compare it against expected baton X.Y.Z values.
     let mut child = Command::new(baton_do_path())
         .args(["--version"])
