@@ -539,6 +539,31 @@ Implementation-detail choices:
 
 ---
 
+### Session 9 — Catch-up audit and 6.1.0 re-pin
+
+**Status:** completed on 2026-07-23.
+
+**Goal:** Not a feature session — an audit. Reconcile SESSIONS.md and the GitHub issue tracker against actual repo/CI state (nothing had been logged since Session 8 closed), check upstream baton for drift, and ship whatever fell out of that.
+
+**Completed:**
+- Reconciled all 10 open issues against current code; everything held up except #27/#31, whose Session-8 blocker had quietly lifted (noted, not scheduled).
+- Cleared the PR backlog: merged #98/#99 (dependabot), closed #97 (Ubuntu 22.04→26.04, too big to wave through).
+- Found upstream baton had moved to 6.0.1 and 6.1.0. Re-pinned to 6.1.0 and implemented the one real gap it introduced — `physical_path` on replicates (#101) — before touching `BATON_COMPAT_VERSION`, and bumped the partisan pin to devel HEAD so CI actually exercises partisan's own test for that field.
+- Filed a second gap (#100, genQuery OOB-write) based on upstream baton's 6.0.1 fix — then retracted it after reading iRODS's actual source: the shared client library is memory-safe by construction, the bug was in baton's own C code. Corrected and closed rather than left stale.
+- Fixed PLAN.md's stale bindgen/`json.rs` references (superseded by Session 4.5, never updated).
+- Landed the `1.0.0-alpha.2` release that had been sitting unshipped on a branch since May (Docker image alignment with upstream conventions, version bump, changelog fix) — merged, tagged, published, verified the container reports the right version.
+
+**Decisions made:**
+- `BATON_COMPAT_VERSION` is an operational claim read by real callers (`STRICT_BATON_COMPAT`), not documentation — never bump it ahead of implementing that version's schema changes.
+- A ported security-fix rationale needs verifying against the actual shared-library source, not inferred from the upstream project's commit message alone.
+- Release automation stays manual (`RELEASING.md`) for now — deprioritized, not declined.
+
+**Deferred / known gaps:**
+- No GitHub Release objects exist for any of the three alpha tags (`RELEASING.md` step 6 has never actually been done) — left as-is.
+- Everything else carried forward from the issue reconciliation is unchanged (#77, #52, #40, #34, #31, #27, #10, #91, #93, #66) — see their GitHub threads, not restated here.
+
+---
+
 ## Session start template for Claude Code
 
 Paste the following at the start of each session, with the placeholders filled in:
@@ -588,3 +613,4 @@ Use this space to record non-trivial changes to the plan itself — e.g. changin
   - **#101** — added `SHIM_COL_DATA_PATH` (→ `COL_D_DATA_PATH`) through the standard shim declare/implement/mirror path, a new `Replicate.physical_path: String` field, and wired it into `fetch_replicates`. Extended the existing `--replicate` integration test and the `Replicate` JSON round-trip unit test.
   - **Caught mid-flight:** an initial pass bumped `BATON_COMPAT_VERSION` (and the Cargo.toml/README "wire-compatible with X" claims) to 6.1.0 *before* implementing either gap — the user caught this as a compat lie (`STRICT_BATON_COMPAT=1 baton-do --version` is read by real callers, not just documentation) before it merged. Recorded as a standing rule in memory (`feedback_compat_version_claims.md`): never bump the operational compat-version claim ahead of implementing that version's schema/behaviour changes.
   - **Partisan pin bumped** (`.github/scripts/partisan-pin`, `58b56da` → `1356610d2a`, devel HEAD) to pick up partisan PR #349 ("Add a physical_path attribute to Replica", merged 2026-07-15), whose `test_replicas` asserts `physical_path is not None` whenever `client_version() >= 6.1.0` — the exact assertion this work needed exercised in CI. Extendo's pin was checked and left alone: no physical_path work exists there yet (`v3.1.0..v3.2.0` diff is dependency bumps only).
+- `2026-07-23` — Session 9 completed: catch-up audit (issue reconciliation, dependabot cleanup) plus the 6.1.0 re-pin above. `1.0.0-alpha.2` — sitting unshipped since May — merged, tagged, and published to GHCR; container verified reporting the correct version.
