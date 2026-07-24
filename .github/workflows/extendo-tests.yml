@@ -1,13 +1,15 @@
 name: "Extendo compatibility tests"
 
-# Trigger budget is deliberately permissive while this workflow
-# is being iterated on: run on every push and every PR so failure
-# modes surface fast. Once the suite is stable across CI runs,
-# tighten to the partisan pattern (`pull_request`, `push` to main,
-# and `push` to branches matching `**compat_extendo**`) to keep
-# the Actions bill sensible. See `partisan-tests.yml` for the
-# target end state.
-on: [push, pull_request]
+# Trigger matches partisan-tests.yml: a bare `push` trigger fires
+# on any ref including tags, which ran this workflow on the 1.0.0
+# tag push. Scoping to `branches:` fixes that (GitHub's `branches:`
+# filter for `push` never matches tag refs). See #110.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "**compat_extendo**"
 
 # End-to-end run of extendo's Ginkgo suite against baton-rs
 # binaries. Extendo is a Go consumer of the baton-do wire envelope;
