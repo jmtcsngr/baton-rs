@@ -16,6 +16,11 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v7
 
+      - name: "Verify Cargo manifest"
+        run: |
+          cargo verify-project
+          cargo metadata --no-deps --format-version 1 > /dev/null
+
       - name: "Build release binaries"
         uses: wtsi-npg/build-irods-client-action@v1.1.1
         with:
