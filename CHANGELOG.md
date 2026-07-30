@@ -7,6 +7,19 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Tag format is bare semver (no `v` prefix) — the git tag matches
 `Cargo.toml`'s `version` field byte-for-byte.
 
+## [1.0.2-alpha.1] — 2026-07-30
+
+Pre-release to validate the new `publish.yml` manifest pre-flight step
+([#93]) against a real tag push before it ships in the next stable patch.
+
+### Added
+
+- `publish.yml` now runs `cargo verify-project` and `cargo metadata`
+  before the build step, failing fast on a broken manifest ([#93]).
+
+[1.0.2-alpha.1]: https://github.com/jmtcsngr/baton-rs/releases/tag/1.0.2-alpha.1
+[#93]: https://github.com/jmtcsngr/baton-rs/issues/93
+
 ## [1.0.1] — 2026-07-24
 
 ### Fixed
