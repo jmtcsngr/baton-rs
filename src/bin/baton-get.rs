@@ -221,6 +221,9 @@ fn main() -> Result<()> {
             output
         };
 
+        // Rebuild before the next record if the connection dropped (#108).
+        session.note_error(output.error());
+
         serde_json::to_writer(&mut out, &output).context("writing output line")?;
         writeln!(&mut out).context("writing newline")?;
     }

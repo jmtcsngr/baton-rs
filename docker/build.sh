@@ -36,3 +36,5 @@ echo "irods" | script -q -c "iinit" /dev/null
 cargo build
 cargo test --lib              # unit tests (no iRODS needed)
 cargo test --test '*'         # integration tests (live iRODS required)
+# fault-injection seam is off by default, so its test needs the feature (#108)
+cargo test --features fault-injection --test fault_injection

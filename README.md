@@ -71,6 +71,11 @@ path and the in-band error path. Known divergences:
 - **`--single-server`** — accepted but a no-op; baton-rs already reuses
   the same connection across records (subject to `--connect-time`
   recycling).
+- **Connection recovery** — on a connection-level error mid-stream,
+  baton-rs rebuilds the connection before the next record so the rest of
+  the stream survives; upstream baton (`reconnFlag=0`) reuses the dropped
+  connection. The in-flight record is still annotated in-band and is not
+  retried. See [#108](https://github.com/jmtcsngr/baton-rs/issues/108).
 - **`--zone`** — accepted but a no-op until cross-zone metaquery
   scoping lands ([#77](https://github.com/jmtcsngr/baton-rs/issues/77));
   per-record metaquery `zone` is also dropped at the operations layer
@@ -142,6 +147,14 @@ The crate links dynamically against iRODS's `irods_client` and
 
 A `.devcontainer` configuration is included for VS Code; see
 [`.devcontainer/setup.sh`](.devcontainer/setup.sh).
+
+The optional `fault-injection` feature compiles a test-only seam that
+drops a live connection mid-stream, so the connection-recovery test can
+run. Off by default; run it by hand against a live iRODS server with:
+
+```sh
+cargo test --features fault-injection --test fault_injection
+```
 
 `Cargo.lock` is gitignored — baton-rs is built from source against
 multiple iRODS-client base images and a pinned lockfile would over-

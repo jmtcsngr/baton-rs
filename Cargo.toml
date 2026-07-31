@@ -7,6 +7,11 @@ description = "Rust reimplementation of baton, the iRODS metadata client. Wire-c
 repository  = "https://github.com/jmtcsngr/baton-rs"
 readme      = "README.md"
 
+[features]
+# Test-only connection-drop seam for issue #108. Off by default; never
+# in release builds. Run: cargo test --features fault-injection --test fault_injection
+fault-injection = []
+
 [dependencies]
 anyhow             = "1"
 clap               = { version = "4", features = ["derive"] }

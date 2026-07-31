@@ -344,6 +344,14 @@ impl Target {
             Target::Collection(c) => c.error.is_some(),
         }
     }
+
+    /// The in-band error annotation, if any (#108).
+    pub fn error(&self) -> Option<&BatonError> {
+        match self {
+            Target::DataObject(d) => d.error.as_ref(),
+            Target::Collection(c) => c.error.as_ref(),
+        }
+    }
 }
 
 /// One operation `baton-metamod` can perform per input line.

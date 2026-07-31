@@ -415,6 +415,8 @@ fn main() -> Result<()> {
                 if output.error.is_some() {
                     had_errors = true;
                 }
+                // Rebuild before the next record if the connection dropped (#108).
+                session.note_error(output.error.as_ref());
                 serde_json::to_writer(&mut out, &output)
                     .context("writing output line")?;
                 writeln!(&mut out).context("writing newline")?;
