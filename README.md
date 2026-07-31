@@ -143,6 +143,14 @@ The crate links dynamically against iRODS's `irods_client` and
 A `.devcontainer` configuration is included for VS Code; see
 [`.devcontainer/setup.sh`](.devcontainer/setup.sh).
 
+The optional `fault-injection` feature compiles a test-only seam that
+drops a live connection mid-stream, so the connection-recovery test can
+run. Off by default; run it by hand against a live iRODS server with:
+
+```sh
+cargo test --features fault-injection --test fault_injection
+```
+
 `Cargo.lock` is gitignored — baton-rs is built from source against
 multiple iRODS-client base images and a pinned lockfile would over-
 constrain the resolver across them. Reconsider if baton-rs ever becomes
