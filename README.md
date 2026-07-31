@@ -71,6 +71,11 @@ path and the in-band error path. Known divergences:
 - **`--single-server`** — accepted but a no-op; baton-rs already reuses
   the same connection across records (subject to `--connect-time`
   recycling).
+- **Connection recovery** — on a connection-level error mid-stream,
+  baton-rs rebuilds the connection before the next record so the rest of
+  the stream survives; upstream baton (`reconnFlag=0`) reuses the dropped
+  connection. The in-flight record is still annotated in-band and is not
+  retried. See [#108](https://github.com/jmtcsngr/baton-rs/issues/108).
 - **`--zone`** — accepted but a no-op until cross-zone metaquery
   scoping lands ([#77](https://github.com/jmtcsngr/baton-rs/issues/77));
   per-record metaquery `zone` is also dropped at the operations layer
