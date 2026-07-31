@@ -59,6 +59,8 @@ pub struct ReconnectingSession {
     conn: RodsConnection,
     last_reconnect: Instant,
     max_connect_time: Duration,
+    /// Rebuild before the next record (#108).
+    needs_rebuild: bool,
 }
 
 impl ReconnectingSession {
@@ -71,6 +73,7 @@ impl ReconnectingSession {
             conn,
             last_reconnect: Instant::now(),
             max_connect_time,
+            needs_rebuild: false,
         }
     }
 
@@ -85,11 +88,20 @@ impl ReconnectingSession {
     /// returned to the caller, which can either propagate it
     /// (fail-fast) or surface it as an in-band per-input error.
     pub fn maybe_reconnect(&mut self) -> Result<&mut RodsConnection, BatonError> {
-        if should_reconnect(self.last_reconnect, self.max_connect_time) {
+        if self.needs_rebuild || should_reconnect(self.last_reconnect, self.max_connect_time) {
             self.conn.reconnect()?;
             self.last_reconnect = Instant::now();
+            self.needs_rebuild = false;
         }
         Ok(&mut self.conn)
+    }
+
+    /// Flag a rebuild before the next record when `err` is
+    /// connection-level; the current record is not retried (#108).
+    pub fn note_error(&mut self, err: Option<&BatonError>) {
+        if matches!(err, Some(e) if e.is_connection_level()) {
+            self.needs_rebuild = true;
+        }
     }
 
     /// Borrow the connection without checking the threshold. Used

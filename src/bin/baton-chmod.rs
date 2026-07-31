@@ -146,6 +146,9 @@ fn main() -> Result<()> {
         // fail-fast — we can't annotate something we couldn't parse.
         let output = chmod_one_annotated(conn, target, &opts);
 
+        // Rebuild before the next record if the connection dropped (#108).
+        session.note_error(output.error());
+
         serde_json::to_writer(&mut out, &output).context("writing output line")?;
         writeln!(&mut out).context("writing newline")?;
     }
