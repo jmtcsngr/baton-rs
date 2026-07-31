@@ -7,6 +7,19 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Tag format is bare semver (no `v` prefix) — the git tag matches
 `Cargo.toml`'s `version` field byte-for-byte.
 
+## [1.1.0] — 2026-07-31
+
+### Added
+
+- Connection recovery: on a connection-level error mid-stream, baton-rs
+  rebuilds the connection before the next record so the rest of the
+  stream survives, instead of reusing the dropped connection ([#108]).
+  The record in flight when the connection dropped is annotated in-band
+  and not retried.
+
+[1.1.0]: https://github.com/jmtcsngr/baton-rs/releases/tag/1.1.0
+[#108]: https://github.com/jmtcsngr/baton-rs/issues/108
+
 ## [1.0.2] — 2026-07-30
 
 ### Added
