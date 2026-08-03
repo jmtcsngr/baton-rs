@@ -1,0 +1,33 @@
+name: "Validate container"
+on:
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".github/workflows/validate-container.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v7
+
+      - name: "Stub release binaries"
+        # The Dockerfile's last layers COPY target/release/baton-*. Stub
+        # them so the build reaches the base image + codename-keyed iRODS
+        # apt layer without a full Rust compile — that layer is where an
+        # unbuildable base (e.g. #119's ubuntu:25.10 / questing) fails.
+        run: |
+          mkdir -p target/release
+          touch target/release/baton-{list,get,put,chmod,metamod,metaquery,do}
+
+      - name: "Build container (no push)"
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
